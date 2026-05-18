@@ -9,10 +9,23 @@ extends Node2D
 const SELECTED_TINT := Color(1.45, 1.25, 0.85)
 const NORMAL_TINT := Color.WHITE
 
+# Camera tunables.
+const ZOOM_STEP := 1.15            # multiplicative factor per wheel notch
+const ZOOM_MIN  := 0.03            # most zoomed-out allowed (whole island visible)
+const ZOOM_MAX  := 4.0             # most zoomed-in allowed (single barony)
+const PAN_KEY_PIXELS_PER_SEC := 800.0  # WASD/arrow speed measured in SCREEN pixels
+
+# Width of the right-hand InfoPanel — subtract from horizontal viewport when
+# computing fit-to-screen so the map isn't half-hidden behind the panel.
+const UI_PANEL_WIDTH := 320.0
+
 # Tracks the currently-selected county by its data-layer name (e.g. "Yorkshire"),
 # not by Polygon2D node, because a single county can be drawn as several polygons
 # (mainland + islands). Empty string means no selection.
 var _selected_county_name: String = ""
+
+# Middle-mouse-drag state.
+var _is_panning: bool = false
 
 func _ready():
 	print("=== _ready() START ===")
@@ -41,55 +54,121 @@ func build_map():
 	
 	print("Polygons created: %d" % polygon_count)
 	
-	# Setup camera — frame the polygons' actual bounding box.
-	# Polygon world coords (after Vector2(4,4) scale) span roughly
-	# X: -900..3880, Y: -4340..4690 — geographic centre around (1500, 170).
 	camera.enabled = true
 	camera.make_current()
-	var bbox := _compute_polygons_bbox()
-	if bbox.size != Vector2.ZERO:
-		camera.position = bbox.get_center()
-		# Use the PROJECT's configured viewport size, not get_viewport_rect().
-		# During _ready() the runtime viewport may report 0 or a default that
-		# produces a microscopic zoom (~0.006) — which looks like a grey screen.
-		var vp_w: float = ProjectSettings.get_setting("display/window/size/viewport_width", 1152)
-		var vp_h: float = ProjectSettings.get_setting("display/window/size/viewport_height", 648)
-		var zx := vp_w / (bbox.size.x * 1.1)
-		var zy := vp_h / (bbox.size.y * 1.1)
-		var z := minf(zx, zy)
-		camera.zoom = Vector2(z, z)
-	else:
-		camera.position = Vector2(1500, 170)
-		camera.zoom = Vector2(0.08, 0.08)
-
+	fit_to_bounds()
 	print("Camera: position=%v, zoom=%v" % [camera.position, camera.zoom])
 	print("=== build_map() END ===")
+
+
+# Frame the camera on the full polygon bounding box, leaving room on the
+# right for the InfoPanel. Bound to the F key in _unhandled_input.
+#
+# Returns: void
+func fit_to_bounds() -> void:
+	var bbox := _compute_polygons_bbox()
+	if bbox.size == Vector2.ZERO:
+		# Fallback: hard-coded centre, used if polygons haven't been built yet.
+		camera.position = Vector2(1500, 170)
+		camera.zoom = Vector2(0.08, 0.08)
+		return
+	# Shift the focal point right so the geographic centre sits in the middle of
+	# the MAP area (viewport minus the panel), not the middle of the full window.
+	var vp_w: float = ProjectSettings.get_setting("display/window/size/viewport_width", 1152)
+	var vp_h: float = ProjectSettings.get_setting("display/window/size/viewport_height", 648)
+	var map_w := vp_w - UI_PANEL_WIDTH
+	# 10% margin so the map doesn't kiss the edges.
+	var zx := map_w / (bbox.size.x * 1.1)
+	var zy := vp_h  / (bbox.size.y * 1.1)
+	var z := minf(zx, zy)
+	camera.zoom = Vector2(z, z)
+	# Camera2D centres its position at the FULL viewport centre. The InfoPanel
+	# covers the right UI_PANEL_WIDTH pixels, so the "map area" centre is offset
+	# LEFT of the viewport centre by half the panel width. To make the bbox
+	# centre appear in the middle of the map area, the camera position must
+	# sit half-a-panel-width to the RIGHT of the bbox centre (in world units).
+	var centre := bbox.get_center()
+	centre.x += (UI_PANEL_WIDTH * 0.5) / z
+	camera.position = centre
 
 # ── INPUT ─────────────────────────────────────────────────────────────────────
 
 # Engine-invoked input callback. We use _unhandled_input (not _input) so that
 # clicks consumed by Control nodes in $UI never reach the map.
 #
+# Bindings:
+#   Left click               → select county under cursor (empty space clears)
+#   Right click              → clear selection
+#   Middle button press/drag → pan camera
+#   Mouse wheel              → zoom in/out at cursor
+#   F                        → fit-to-bounds (refit whole map)
+#
 # Args:
-#   event (InputEvent): Anything the engine sends — we only act on a left
-#       mouse button PRESS. Right-click clears selection.
-# Returns:
-#   void
+#   event (InputEvent): Any input event from the engine.
+# Returns: void
 func _unhandled_input(event: InputEvent) -> void:
-	if not (event is InputEventMouseButton):
-		return
-	var mb := event as InputEventMouseButton
-	if not mb.pressed:
-		return
-	if mb.button_index == MOUSE_BUTTON_LEFT:
-		var world_pos := get_global_mouse_position()
-		var hit := _county_polygon_at(world_pos)
-		if hit:
-			_select_county(hit.get_meta("county_name", ""))
-		else:
-			_clear_selection()
-	elif mb.button_index == MOUSE_BUTTON_RIGHT:
-		_clear_selection()
+	if event is InputEventMouseButton:
+		var mb := event as InputEventMouseButton
+		match mb.button_index:
+			MOUSE_BUTTON_LEFT:
+				if mb.pressed:
+					var hit := _county_polygon_at(get_global_mouse_position())
+					if hit:
+						_select_county(hit.get_meta("county_name", ""))
+					else:
+						_clear_selection()
+			MOUSE_BUTTON_RIGHT:
+				if mb.pressed:
+					_clear_selection()
+			MOUSE_BUTTON_MIDDLE:
+				_is_panning = mb.pressed
+			MOUSE_BUTTON_WHEEL_UP:
+				if mb.pressed:
+					_zoom_at_cursor(ZOOM_STEP)
+			MOUSE_BUTTON_WHEEL_DOWN:
+				if mb.pressed:
+					_zoom_at_cursor(1.0 / ZOOM_STEP)
+	elif event is InputEventMouseMotion and _is_panning:
+		# Drag: shift camera opposite to mouse motion so the world point under
+		# the cursor stays under the cursor. event.relative is in SCREEN pixels;
+		# divide by zoom to get world delta.
+		camera.position -= (event as InputEventMouseMotion).relative / camera.zoom
+	elif event is InputEventKey and event.pressed and not event.echo:
+		if (event as InputEventKey).keycode == KEY_F:
+			fit_to_bounds()
+
+
+# Engine-invoked per frame. Reads keyboard pan input (WASD or arrows) and
+# nudges the camera. Pan speed is constant in SCREEN pixels so it feels the
+# same regardless of zoom level.
+#
+# Args:
+#   delta (float): Seconds since last frame.
+# Returns: void
+func _process(delta: float) -> void:
+	var dir := Vector2.ZERO
+	if Input.is_key_pressed(KEY_A) or Input.is_key_pressed(KEY_LEFT):  dir.x -= 1.0
+	if Input.is_key_pressed(KEY_D) or Input.is_key_pressed(KEY_RIGHT): dir.x += 1.0
+	if Input.is_key_pressed(KEY_W) or Input.is_key_pressed(KEY_UP):    dir.y -= 1.0
+	if Input.is_key_pressed(KEY_S) or Input.is_key_pressed(KEY_DOWN):  dir.y += 1.0
+	if dir != Vector2.ZERO:
+		camera.position += dir.normalized() * PAN_KEY_PIXELS_PER_SEC * delta / camera.zoom
+
+
+# Zoom toward (or away from) the world point currently under the mouse cursor.
+# Works by recording the world-space mouse position before the zoom change,
+# applying the zoom, then shifting the camera so the same world point lands
+# under the cursor afterwards.
+#
+# Args:
+#   factor (float): Multiplicative zoom change. >1 zooms in, <1 zooms out.
+# Returns: void
+func _zoom_at_cursor(factor: float) -> void:
+	var mouse_world_before := get_global_mouse_position()
+	var new_zoom: float = clampf(camera.zoom.x * factor, ZOOM_MIN, ZOOM_MAX)
+	camera.zoom = Vector2(new_zoom, new_zoom)
+	var mouse_world_after := get_global_mouse_position()
+	camera.position += mouse_world_before - mouse_world_after
 
 
 # Find the topmost Polygon2D under a world-space point.
