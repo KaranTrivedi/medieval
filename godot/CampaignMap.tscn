@@ -69,8 +69,9 @@ visible = true
 script = ExtResource("2_uipanel")
 
 [node name="Control" type="Control" parent="UI"]
-anchors_right = 1.0
-anchors_bottom = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
 
 [node name="InfoPanel" type="Panel" parent="UI/Control"]
 anchor_left = 1.0
@@ -81,6 +82,7 @@ offset_left = -320.0
 offset_right = 0.0
 offset_top = 0.0
 offset_bottom = 0.0
+mouse_filter = 0
 
 [node name="VBoxContainer" type="VBoxContainer" parent="UI/Control/InfoPanel"]
 anchor_right = 1.0
@@ -132,7 +134,7 @@ text = "Income"
 label_settings = SubResource("LabelSettings_7")
 
 [node name="IncomeValue" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/IncomeHBox"]
-text = "— ₪/yr"
+text = "— £/yr"
 label_settings = SubResource("LabelSettings_8")
 
 [node name="GarrisonHBox" type="HBoxContainer" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection"]
@@ -156,5 +158,11 @@ label_settings = SubResource("LabelSettings_11")
 [node name="PopulationValue" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/PopulationHBox"]
 text = "—"
 label_settings = SubResource("LabelSettings_12")
+
+[node name="Spacer" type="Control" parent="UI/Control/InfoPanel/VBoxContainer"]
+size_flags_vertical = 3
+
+[node name="SaveButton" type="Button" parent="UI/Control/InfoPanel/VBoxContainer"]
+text = "Save Game"
 
 
