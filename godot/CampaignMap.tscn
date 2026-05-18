@@ -1,0 +1,160 @@
+[gd_scene format=3 uid="uid://i1hvn2qu4dum"]
+
+[ext_resource type="Script" uid="uid://c7q7qnbrv2bak" path="res://CampaignMap.gd" id="1_bvam6"]
+[ext_resource type="Script" path="res://ui_panel.gd" id="2_uipanel"]
+
+[sub_resource type="LabelSettings" id="LabelSettings_1"]
+font_sizes/font_size = 20
+font_colors/font_color = Color(0.79, 0.59, 0.24, 1)
+outline_size = 1
+outline_color = Color(0.05, 0.04, 0.01, 1)
+
+[sub_resource type="LabelSettings" id="LabelSettings_2"]
+font_sizes/font_size = 10
+font_colors/font_color = Color(0.42, 0.31, 0.19, 1)
+
+[sub_resource type="LabelSettings" id="LabelSettings_3"]
+font_sizes/font_size = 12
+font_colors/font_color = Color(0.87, 0.79, 0.63, 1)
+
+[sub_resource type="LabelSettings" id="LabelSettings_4"]
+font_sizes/font_size = 11
+font_colors/font_color = Color(0.79, 0.59, 0.24, 1)
+
+[sub_resource type="LabelSettings" id="LabelSettings_5"]
+font_sizes/font_size = 10
+font_colors/font_color = Color(0.42, 0.31, 0.19, 1)
+
+[sub_resource type="LabelSettings" id="LabelSettings_6"]
+font_sizes/font_size = 11
+font_colors/font_color = Color(0.87, 0.79, 0.63, 1)
+
+[sub_resource type="LabelSettings" id="LabelSettings_7"]
+font_sizes/font_size = 10
+font_colors/font_color = Color(0.42, 0.31, 0.19, 1)
+
+[sub_resource type="LabelSettings" id="LabelSettings_8"]
+font_sizes/font_size = 11
+font_colors/font_color = Color(0.79, 0.59, 0.24, 1)
+
+[sub_resource type="LabelSettings" id="LabelSettings_9"]
+font_sizes/font_size = 10
+font_colors/font_color = Color(0.42, 0.31, 0.19, 1)
+
+[sub_resource type="LabelSettings" id="LabelSettings_10"]
+font_sizes/font_size = 11
+font_colors/font_color = Color(0.87, 0.79, 0.63, 1)
+
+[sub_resource type="LabelSettings" id="LabelSettings_11"]
+font_sizes/font_size = 10
+font_colors/font_color = Color(0.42, 0.31, 0.19, 1)
+
+[sub_resource type="LabelSettings" id="LabelSettings_12"]
+font_sizes/font_size = 11
+font_colors/font_color = Color(0.87, 0.79, 0.63, 1)
+
+[node name="CampaignMap" type="Node2D" unique_id=215796415]
+script = ExtResource("1_bvam6")
+
+[node name="CountyLayer" type="Node2D" parent="." unique_id=1787511703]
+visible = true
+
+[node name="BorderLayer" type="Node2D" parent="." unique_id=1628466703]
+
+[node name="LabelLayer" type="Node2D" parent="." unique_id=1063810222]
+
+[node name="Camera2D" type="Camera2D" parent="." unique_id=839497573]
+
+[node name="UI" type="CanvasLayer" parent="." unique_id=1104534088]
+script = ExtResource("2_uipanel")
+
+[node name="Control" type="Control" parent="UI"]
+anchors_right = 1.0
+anchors_bottom = 1.0
+
+[node name="InfoPanel" type="Panel" parent="UI/Control"]
+anchor_left = 1.0
+anchor_right = 1.0
+anchor_top = 0.0
+anchor_bottom = 1.0
+offset_left = -320.0
+offset_right = 0.0
+offset_top = 0.0
+offset_bottom = 0.0
+
+[node name="VBoxContainer" type="VBoxContainer" parent="UI/Control/InfoPanel"]
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 10.0
+offset_top = 10.0
+offset_right = -10.0
+offset_bottom = -10.0
+theme_override_constants/separation = 12
+
+[node name="CountyName" type="Label" parent="UI/Control/InfoPanel/VBoxContainer"]
+text = "Select a County"
+label_settings = SubResource("LabelSettings_1")
+
+[node name="DuchySection" type="HBoxContainer" parent="UI/Control/InfoPanel/VBoxContainer"]
+theme_override_constants/separation = 20
+
+[node name="DuchyLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/DuchySection"]
+text = "DUCHY"
+label_settings = SubResource("LabelSettings_2")
+
+[node name="DuchyValue" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/DuchySection"]
+text = "—"
+label_settings = SubResource("LabelSettings_3")
+
+[node name="GovernanceSection" type="VBoxContainer" parent="UI/Control/InfoPanel/VBoxContainer"]
+theme_override_constants/separation = 8
+
+[node name="GovernanceTitle" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection"]
+text = "GOVERNANCE"
+label_settings = SubResource("LabelSettings_4")
+
+[node name="EarlHBox" type="HBoxContainer" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection"]
+theme_override_constants/separation = 16
+
+[node name="EarlLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/EarlHBox"]
+text = "Earl"
+label_settings = SubResource("LabelSettings_5")
+
+[node name="EarlValue" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/EarlHBox"]
+text = "—"
+label_settings = SubResource("LabelSettings_6")
+
+[node name="IncomeHBox" type="HBoxContainer" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection"]
+theme_override_constants/separation = 16
+
+[node name="IncomeLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/IncomeHBox"]
+text = "Income"
+label_settings = SubResource("LabelSettings_7")
+
+[node name="IncomeValue" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/IncomeHBox"]
+text = "— ₪/yr"
+label_settings = SubResource("LabelSettings_8")
+
+[node name="GarrisonHBox" type="HBoxContainer" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection"]
+theme_override_constants/separation = 16
+
+[node name="GarrisonLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/GarrisonHBox"]
+text = "Garrison"
+label_settings = SubResource("LabelSettings_9")
+
+[node name="GarrisonValue" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/GarrisonHBox"]
+text = "—"
+label_settings = SubResource("LabelSettings_10")
+
+[node name="PopulationHBox" type="HBoxContainer" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection"]
+theme_override_constants/separation = 16
+
+[node name="PopulationLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/PopulationHBox"]
+text = "Population"
+label_settings = SubResource("LabelSettings_11")
+
+[node name="PopulationValue" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/PopulationHBox"]
+text = "—"
+label_settings = SubResource("LabelSettings_12")
+
+

@@ -1,0 +1,4 @@
+*.exe
+*.json
+
+comfy_workflows/*
