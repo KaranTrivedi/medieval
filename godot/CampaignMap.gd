@@ -15,6 +15,10 @@ const ZOOM_MIN  := 0.03            # most zoomed-out allowed (whole island visib
 const ZOOM_MAX  := 4.0             # most zoomed-in allowed (single barony)
 const PAN_KEY_PIXELS_PER_SEC := 800.0  # WASD/arrow speed measured in SCREEN pixels
 
+# Distance in screen pixels a left-mouse press must move before we treat it
+# as a drag (and pan the camera) rather than a click (and select a county).
+const CLICK_DRAG_THRESHOLD := 5.0
+
 # Width of the right-hand InfoPanel — subtract from horizontal viewport when
 # computing fit-to-screen so the map isn't half-hidden behind the panel.
 const UI_PANEL_WIDTH := 320.0
@@ -26,6 +30,11 @@ var _selected_county_name: String = ""
 
 # Middle-mouse-drag state.
 var _is_panning: bool = false
+
+# Left-mouse press/drag state — used to differentiate a click (select) from a
+# drag (pan). Set on press, mutated on motion, read on release.
+var _left_press_pos: Vector2 = Vector2.ZERO
+var _left_dragged: bool = false
 
 func _ready():
 	print("=== _ready() START ===")
@@ -97,10 +106,11 @@ func fit_to_bounds() -> void:
 # clicks consumed by Control nodes in $UI never reach the map.
 #
 # Bindings:
-#   Left click               → select county under cursor (empty space clears)
-#   Right click              → clear selection
-#   Middle button press/drag → pan camera
+#   Left click (no drag)     → select county under cursor
+#   Left click + drag        → pan camera (drag threshold = CLICK_DRAG_THRESHOLD px)
+#   Middle button press/drag → pan camera (alternate)
 #   Mouse wheel              → zoom in/out at cursor
+#   Escape                   → clear selection
 #   F                        → fit-to-bounds (refit whole map)
 #
 # Args:
@@ -112,14 +122,16 @@ func _unhandled_input(event: InputEvent) -> void:
 		match mb.button_index:
 			MOUSE_BUTTON_LEFT:
 				if mb.pressed:
-					var hit := _county_polygon_at(get_global_mouse_position())
-					if hit:
-						_select_county(hit.get_meta("county_name", ""))
-					else:
-						_clear_selection()
-			MOUSE_BUTTON_RIGHT:
-				if mb.pressed:
-					_clear_selection()
+					_left_press_pos = mb.position
+					_left_dragged = false
+				else:
+					# Release. If we never crossed the drag threshold, treat as
+					# a click and select the county under the cursor. Empty-
+					# space clicks do NOT clear — use Escape for that.
+					if not _left_dragged:
+						var hit := _county_polygon_at(get_global_mouse_position())
+						if hit:
+							_select_county(hit.get_meta("county_name", ""))
 			MOUSE_BUTTON_MIDDLE:
 				_is_panning = mb.pressed
 			MOUSE_BUTTON_WHEEL_UP:
@@ -128,14 +140,24 @@ func _unhandled_input(event: InputEvent) -> void:
 			MOUSE_BUTTON_WHEEL_DOWN:
 				if mb.pressed:
 					_zoom_at_cursor(1.0 / ZOOM_STEP)
-	elif event is InputEventMouseMotion and _is_panning:
-		# Drag: shift camera opposite to mouse motion so the world point under
-		# the cursor stays under the cursor. event.relative is in SCREEN pixels;
-		# divide by zoom to get world delta.
-		camera.position -= (event as InputEventMouseMotion).relative / camera.zoom
+	elif event is InputEventMouseMotion:
+		var mm := event as InputEventMouseMotion
+		# Left-mouse-drag pan: promote a held left-button to "dragging" once
+		# motion exceeds the click threshold, then pan on subsequent motion.
+		if Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
+			if not _left_dragged:
+				if mm.position.distance_to(_left_press_pos) > CLICK_DRAG_THRESHOLD:
+					_left_dragged = true
+			if _left_dragged:
+				camera.position -= mm.relative / camera.zoom
+		elif _is_panning:
+			camera.position -= mm.relative / camera.zoom
 	elif event is InputEventKey and event.pressed and not event.echo:
-		if (event as InputEventKey).keycode == KEY_F:
-			fit_to_bounds()
+		match (event as InputEventKey).keycode:
+			KEY_ESCAPE:
+				_clear_selection()
+			KEY_F:
+				fit_to_bounds()
 
 
 # Engine-invoked per frame. Reads keyboard pan input (WASD or arrows) and

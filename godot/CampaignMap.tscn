@@ -2,6 +2,7 @@
 
 [ext_resource type="Script" uid="uid://c7q7qnbrv2bak" path="res://CampaignMap.gd" id="1_bvam6"]
 [ext_resource type="Script" path="res://ui_panel.gd" id="2_uipanel"]
+[ext_resource type="Script" path="res://top_bar.gd" id="3_topbar"]
 
 [sub_resource type="LabelSettings" id="LabelSettings_1"]
 font_sizes/font_size = 20
@@ -72,6 +73,40 @@ script = ExtResource("2_uipanel")
 anchor_right = 1.0
 anchor_bottom = 1.0
 mouse_filter = 2
+
+[node name="TopBar" type="Panel" parent="UI/Control"]
+anchor_right = 1.0
+offset_right = -320.0
+offset_bottom = 40.0
+mouse_filter = 0
+script = ExtResource("3_topbar")
+
+[node name="HBox" type="HBoxContainer" parent="UI/Control/TopBar"]
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 14.0
+offset_top = 4.0
+offset_right = -14.0
+offset_bottom = -4.0
+theme_override_constants/separation = 24
+
+[node name="TurnLabel" type="Label" parent="UI/Control/TopBar/HBox"]
+text = "Turn —"
+label_settings = SubResource("LabelSettings_4")
+
+[node name="SeasonLabel" type="Label" parent="UI/Control/TopBar/HBox"]
+text = "—"
+label_settings = SubResource("LabelSettings_6")
+
+[node name="Spacer" type="Control" parent="UI/Control/TopBar/HBox"]
+size_flags_horizontal = 3
+
+[node name="TreasuryLabel" type="Label" parent="UI/Control/TopBar/HBox"]
+text = "0 £"
+label_settings = SubResource("LabelSettings_1")
+
+[node name="EndTurnButton" type="Button" parent="UI/Control/TopBar/HBox"]
+text = "End Turn"
 
 [node name="InfoPanel" type="Panel" parent="UI/Control"]
 anchor_left = 1.0

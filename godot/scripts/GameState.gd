@@ -131,6 +131,57 @@ func current_turn() -> int:
 	return int(db.query_result[0]["t"])
 
 
+# Run one full end-of-turn step for the player faction:
+#   1. For every county the player owns, roll a Gaussian harvest multiplier
+#      (per Project.md §10) against the static base income from MapData and
+#      sum the rolled incomes.
+#   2. Credit the total to the player's treasury.
+#   3. Advance the turn counter.
+#
+# Args: none — operates on player_faction_id.
+# Returns:
+#   Dictionary: {
+#       "turn":          int,    # the new turn number (after advancing)
+#       "total_income":  int,    # treasury delta this turn
+#       "counties":      Array,  # [{id, base, mult, income}, ...] per county
+#       "treasury":      int,    # treasury value AFTER applying income
+#   }
+func end_turn() -> Dictionary:
+	var summary: Dictionary = {"counties": [], "total_income": 0}
+
+	db.query_with_bindings(
+		"SELECT county_id FROM counties_state WHERE owner_faction_id = ?;",
+		[player_faction_id]
+	)
+	# Copy the result rows now — adjust_treasury below issues its own queries
+	# that would overwrite db.query_result mid-iteration.
+	var owned_ids: Array = []
+	for row in db.query_result:
+		owned_ids.append(row["county_id"])
+
+	var total: int = 0
+	for cid in owned_ids:
+		var co: Dictionary = MapData.get_county(cid)
+		var base: int = int(co.get("income", 0))
+		var mult: float = GaussianSystem.harvest_roll()
+		var income: int = roundi(base * mult)
+		total += income
+		summary.counties.append({"id": cid, "base": base, "mult": mult, "income": income})
+
+	summary.total_income = total
+	if total != 0:
+		# adjust_treasury also emits state_changed, but we'll emit again after
+		# advance_turn so listeners only need one refresh per end-turn.
+		db.query_with_bindings(
+			"UPDATE factions SET treasury = treasury + ? WHERE id = ?;",
+			[total, player_faction_id]
+		)
+
+	summary.turn = advance_turn()  # advance_turn emits state_changed
+	summary.treasury = int(faction(player_faction_id).get("treasury", 0))
+	return summary
+
+
 # Append the next turn row. Year/season derived from turn count, starting at
 # 1247 spring (turn 1) per Project.md.
 #
