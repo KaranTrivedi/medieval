@@ -2,7 +2,7 @@
 # Godot 4 Autoload Singleton — England Political Map
 #
 # SETUP:
-#   1. Copy bg_godot.json to res://data/bg_godot.json
+#   1. Copy gb_godot.json to res://data/gb_godot.json
 #   2. Project → Project Settings → Autoload → Add this script as "MapData"
 #   3. Access from OTHER scripts: MapData.get_county("yorkshire")
 #
@@ -20,7 +20,7 @@ var adjacency  : Dictionary = {}
 var economy    : Dictionary = {}
 
 var is_loaded  : bool = false
-const DATA_PATH = "res://data/bg_godot.json"
+const DATA_PATH = "res://data/gb_godot.json"
 
 # ── SIGNALS ───────────────────────────────────────────────────────────────────
 signal map_loaded
@@ -33,7 +33,7 @@ func _ready() -> void:
 func _load_map() -> void:
 	if not FileAccess.file_exists(DATA_PATH):
 		push_error("MapData: File not found at " + DATA_PATH)
-		push_error("MapData: Run convert_to_godot.py first, then copy bg_godot.json to res://data/")
+		push_error("MapData: Run convert_to_godot.py first, then copy gb_godot.json to res://data/")
 		return
 
 	var file = FileAccess.open(DATA_PATH, FileAccess.READ)
@@ -85,7 +85,31 @@ func _load_map() -> void:
 	print("MapData: Loaded %d duchies, %d counties, %d baronies." % [
 		duchies.size(), counties.size(), barony_total
 	])
+	# Merge the design overlay (lord names, baseline economy, colours …)
+	# from DesignData onto the geometry dicts so existing code paths that
+	# read `MapData.counties[cn].earl` etc. keep working.
+	_merge_design_overlay()
 	map_loaded.emit()
+
+
+# Pull DesignData (autoloaded BEFORE MapData) values onto counties + duchies.
+# Safe to call repeatedly; each merge overwrites previous design keys but
+# never touches geometry fields like polygons/center/baronies.
+func _merge_design_overlay() -> void:
+	var dd: Node = get_node_or_null("/root/DesignData")
+	if dd == null:
+		push_warning("MapData: DesignData autoload missing — running geometry-only")
+		return
+	if not dd.loaded:
+		return
+	for did in duchies.keys():
+		var d_design: Dictionary = dd.duchy(did)
+		for k in d_design.keys():
+			duchies[did][k] = d_design[k]
+	for cn in counties.keys():
+		var c_design: Dictionary = dd.county(cn)
+		for k in c_design.keys():
+			counties[cn][k] = c_design[k]
 
 # ── COUNTY ACCESSORS ──────────────────────────────────────────────────────────
 func get_county(county_name: String) -> Dictionary:
@@ -287,7 +311,7 @@ func total_duchy_income(duchy_id: String) -> int:
 
 # ── SCENE BUILDER ─────────────────────────────────────────────────────────────
 func build_county_polygons(parent: Node2D, world_scale: Vector2 = Vector2(4, 4)) -> void:
-	# Pull colours directly from MapData.duchies (populated from bg_godot.json)
+	# Pull colours directly from MapData.duchies (populated from gb_godot.json)
 	# so adding new duchies in the data file works without touching this code.
 	#
 	# Why fully opaque now: when the fill was 0.65 alpha, low-saturation
@@ -356,7 +380,7 @@ func build_county_polygons(parent: Node2D, world_scale: Vector2 = Vector2(4, 4))
 	print("MapData: Built %d county fills as %d convex pieces." % [county_count, piece_count])
 
 
-# Draw ONE outline per county. The bg_godot.json data file has already
+# Draw ONE outline per county. The gb_godot.json data file has already
 # unioned each county's LADs via shapely (in convert_to_godot.py), so we just
 # render whatever polygon rings the data hands us — no in-engine merging.
 #
@@ -567,7 +591,7 @@ func build_labels(parent: Node2D, world_scale: Vector2 = Vector2(4, 4)) -> void:
 
 	# DUCHY LABELS — placed along the unioned duchy polygon's principal axis,
 	# curved like county labels. Uses the duchy's largest pre-computed ring
-	# (from duchies[did].polygons in bg_godot.json).
+	# (from duchies[did].polygons in gb_godot.json).
 	for did in duchies:
 		var d_polys_raw: Array = duchies[did].get("polygons", [])
 		# Pick the largest ring as the label's anchor polygon.

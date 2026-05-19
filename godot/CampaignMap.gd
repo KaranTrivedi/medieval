@@ -21,9 +21,11 @@ const SELECTED_TINT := Color(1.45, 1.25, 0.85)
 const NORMAL_TINT := Color.WHITE
 
 # Barony outlines are dark + thin — a modulate-style tint isn't visible on
-# them. So we swap the line colour directly to this gold instead, and
-# restore the original from the "base_color" meta stored at build time.
-const SELECTED_BARONY_COLOR := Color(0.98, 0.78, 0.20, 1.0)
+# them. So we swap the line colour directly to bright yellow, AND fatten
+# their on-screen width via the screen_px meta that _update_border_widths
+# reads. Originals stored as "base_color" + "base_screen_px" metas.
+const SELECTED_BARONY_COLOR := Color(1.0, 0.92, 0.0, 1.0)
+const SELECTED_BARONY_PX_MULT := 3.5     # 3.5× the normal hairline width
 
 # Camera tunables.
 const ZOOM_STEP := 1.15            # multiplicative factor per wheel notch
@@ -88,7 +90,7 @@ func build_map():
 	print("County layer has %d children" % county_layer.get_child_count())
 
 	if not MapData.is_loaded:
-		push_error("MapData failed to load — check res://data/bg_godot.json")
+		push_error("MapData failed to load — check res://data/gb_godot.json")
 		return
 	
 	print("Building polygons...")
@@ -447,14 +449,22 @@ func _select_barony(hit: Dictionary) -> void:
 	_selected_type = "barony"
 	_selected_county_name = ""
 	_selected_barony = str(hit.get("id", ""))
-	# Swap the colour of every outline (solid + dashed) belonging to this
-	# barony to the highlight gold. Modulate is too subtle on thin dark lines.
+	# Swap colour + bump screen_px so the highlight reads from across the
+	# screen, not just on the line where the cursor was.
+	var zoom: float = camera.zoom.x
 	for child in border_layer.get_children():
 		if str(child.get_meta("barony_id", "")) != _selected_barony:
 			continue
+		var base_px: float = float(child.get_meta("screen_px", 1.4))
+		child.set_meta("base_screen_px", base_px)
+		var new_px: float = base_px * SELECTED_BARONY_PX_MULT
+		child.set_meta("screen_px", new_px)
 		if child is Line2D:
-			(child as Line2D).default_color = SELECTED_BARONY_COLOR
+			var line: Line2D = child
+			line.default_color = SELECTED_BARONY_COLOR
+			line.width = new_px / max(zoom, 0.0001)
 		elif child.has_method("queue_redraw"):  # DashedPolygon
+			child.screen_px = new_px
 			child.color = SELECTED_BARONY_COLOR
 			child.queue_redraw()
 	# Also tint the parent county for additional visual context.
@@ -483,17 +493,24 @@ func _clear_selection_tint() -> void:
 			for cn in MapData.counties:
 				_tint_county(cn, NORMAL_TINT)
 		"barony":
-			# Restore each outline's base colour (stored on the node as meta
-			# at build time) AND drop the parent-county tint.
+			# Restore each outline's base colour + screen_px (both stashed
+			# as meta at build / selection time) and drop the parent-county tint.
 			if _selected_barony != "":
+				var zoom: float = camera.zoom.x
 				for child in border_layer.get_children():
 					if str(child.get_meta("barony_id", "")) != _selected_barony:
 						continue
-					var base: Color = child.get_meta("base_color", Color.WHITE)
+					var base_color: Color = child.get_meta("base_color", Color.WHITE)
+					var base_px: float = float(child.get_meta("base_screen_px",
+							child.get_meta("screen_px", 1.4)))
+					child.set_meta("screen_px", base_px)
 					if child is Line2D:
-						(child as Line2D).default_color = base
+						var line: Line2D = child
+						line.default_color = base_color
+						line.width = base_px / max(zoom, 0.0001)
 					elif child.has_method("queue_redraw"):
-						child.color = base
+						child.color = base_color
+						child.screen_px = base_px
 						child.queue_redraw()
 			for cn in MapData.counties:
 				_tint_county(cn, NORMAL_TINT)

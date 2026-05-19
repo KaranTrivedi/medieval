@@ -1,6 +1,7 @@
 *.exe
 *.json
 
-!bg_godot.json
+!gb_godot.json
+!gb-topo_lad_godot.json
 
 comfy_workflows/*

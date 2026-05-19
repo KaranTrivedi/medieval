@@ -666,7 +666,6 @@ The trebuchet is the king of siege weapons in this era:
 - Win condition (capture enemy capital or achieve stability threshold)
 
 Text labels mostly fit inside the regions. Either curve the text or wrap, dont curve the text if it fits.
-Add the baronies.
 
 We can have another overlay showing cities, castles, fiefs/key resources/mansions.
 Text sometimes gets mushed in small sections. Allow wrapping where possible, make font smaller if needed.

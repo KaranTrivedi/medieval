@@ -1,6 +1,6 @@
 """
 convert_to_godot.py
-Converts data/gb-topo_lad.json → data/bg_godot.json
+Converts data/gb-topo_lad.json → data/gb_godot.json
 with polygons as flat [x,y] arrays ready for Godot PackedVector2Array.
 
 Run from the godot/ project directory:
@@ -16,7 +16,7 @@ import os
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 INPUT_PATH  = os.path.join(SCRIPT_DIR, "data", "gb-topo_lad.json")
-OUTPUT_PATH = os.path.join(SCRIPT_DIR, "data", "bg_godot.json")
+OUTPUT_PATH = os.path.join(SCRIPT_DIR, "data", "gb_godot.json")
 
 # ── LOAD TOPOJSON ──────────────────────────────────────────────────────────────
 with open(INPUT_PATH, "r") as f:
@@ -243,85 +243,18 @@ assign(['S12000026'], 'Borders', 'lothian')                                     
 assign(['S12000044','S12000029','S12000046','S12000038','S12000011','S12000039','S12000045','S12000018','S12000021','S12000028','S12000008'], 'Strathclyde', 'lothian')  # all Lanarkshires + Glasgow + Renfrewshires + Dunbartonshires + Inverclyde + Ayrshires
 assign(['S12000006'], 'Galloway', 'lothian')                                                # Dumfries and Galloway
 
-# ── COUNTY DATA ────────────────────────────────────────────────────────────────
-COUNTY_DATA = {
-    'Northumberland': {'earl':'Henry de Percy','income':240,'garrison':280,'pop':42000},
-    'Durham':         {'earl':'Prince-Bishop','income':310,'garrison':220,'pop':38000},
-    'Cumberland':     {'earl':'Ranulf de Dacre','income':195,'garrison':180,'pop':31000},
-    'Westmorland':    {'earl':'Robert de Clifford','income':160,'garrison':140,'pop':22000},
-    'Lancashire':     {'earl':'Thomas de Lancaster','income':285,'garrison':240,'pop':55000},
-    'Yorkshire':      {'earl':'Robert de Percy','income':420,'garrison':350,'pop':82000},
-    'Cheshire':       {'earl':'John de Lacy','income':220,'garrison':200,'pop':48000},
-    'Derbyshire':     {'earl':'Wm. de Ferrers','income':195,'garrison':170,'pop':44000},
-    'Nottinghamshire':{'earl':'Roger de Mortimer','income':210,'garrison':180,'pop':46000},
-    'Lincolnshire':   {'earl':'Ranulf de Blondeville','income':310,'garrison':260,'pop':68000},
-    'Staffordshire':  {'earl':'Robert de Stafford','income':185,'garrison':155,'pop':40000},
-    'Leicestershire': {'earl':'Simon de Montfort','income':240,'garrison':195,'pop':52000},
-    'Shropshire':     {'earl':'FitzAlan','income':165,'garrison':185,'pop':35000},
-    'Herefordshire':  {'earl':'Humphrey de Bohun','income':155,'garrison':170,'pop':30000},
-    'Worcestershire': {'earl':'Wm. de Beauchamp','income':195,'garrison':155,'pop':42000},
-    'Warwickshire':   {'earl':'Henry de Hastings','income':225,'garrison':180,'pop':50000},
-    'Gloucestershire':{'earl':'Richard de Clare','income':280,'garrison':220,'pop':58000},
-    'Oxfordshire':    {'earl':'Roger de Vere','income':260,'garrison':195,'pop':54000},
-    'Buckinghamshire':{'earl':'Walter Giffard','income':205,'garrison':165,'pop':44000},
-    'Northamptonshire':{'earl':'Saher de Quincy','income':215,'garrison':175,'pop':48000},
-    'Bedfordshire':   {'earl':'Roger de Beauchamp','income':170,'garrison':140,'pop':35000},
-    'Norfolk':        {'earl':'Roger Bigod','income':340,'garrison':270,'pop':72000},
-    'Suffolk':        {'earl':'Hugh Bigod','income':295,'garrison':235,'pop':62000},
-    'Essex':          {'earl':'Geoff. de Mandeville','income':310,'garrison':240,'pop':66000},
-    'Cambridgeshire': {'earl':'John de Burgh','income':235,'garrison':185,'pop':50000},
-    'Hertfordshire':  {'earl':'Roger de Tony','income':200,'garrison':155,'pop':42000},
-    'Middlesex':      {'earl':'Crown Direct (London)','income':480,'garrison':380,'pop':95000},
-    'Kent':           {'earl':'Hubert de Burgh','income':360,'garrison':290,'pop':74000},
-    'Surrey':         {'earl':'John de Warenne','income':245,'garrison':185,'pop':50000},
-    'Sussex':         {'earl':'John de Braose','income':225,'garrison':185,'pop':48000},
-    'Berkshire':      {'earl':'Crown Direct','income':200,'garrison':150,'pop':38000},
-    'Hampshire':      {'earl':'Baldwin de Reviers','income':265,'garrison':205,'pop':56000},
-    'Wiltshire':      {'earl':'Patrick de Chaworth','income':205,'garrison':165,'pop':44000},
-    'Dorset':         {'earl':'Wm. de Mandeville','income':180,'garrison':145,'pop':36000},
-    'Somerset':       {'earl':'Roger de Clifford','income':220,'garrison':175,'pop':46000},
-    'Devon':          {'earl':'Hugh de Courtenay','income':195,'garrison':160,'pop':40000},
-    'Cornwall':       {'earl':'Richard of Cornwall','income':285,'garrison':210,'pop':52000},
-    # WALES — 8 counties grouped into 3 duchies (Gwynedd, Deheubarth, Morgannwg)
-    'Gwynedd':        {'earl':'Llywelyn ap Gruffudd','income':95,'garrison':220,'pop':22000},
-    'Perfeddwlad':    {'earl':'Dafydd ap Gruffudd','income':70,'garrison':140,'pop':18000},
-    'Powys':          {'earl':'Gruffudd Maelor','income':65,'garrison':120,'pop':15000},
-    'Ceredigion':     {'earl':'Maredudd ap Owain','income':55,'garrison':95,'pop':11000},
-    'Dyfed':          {'earl':'Rhys ap Maredudd','income':75,'garrison':120,'pop':16000},
-    'Gower':          {'earl':'John de Mowbray','income':95,'garrison':150,'pop':17000},
-    'Glamorgan':      {'earl':'Richard de Clare','income':155,'garrison':210,'pop':26000},
-    'Gwent':          {'earl':'Humphrey de Bohun','income':110,'garrison':170,'pop':19000},
-
-    # SCOTLAND — 11 counties grouped into 3 duchies (Highlands, Moray, Lothian)
-    'Highland':       {'earl':'William, Earl of Ross','income':85,'garrison':220,'pop':24000},
-    'Argyll':         {'earl':'Eóghan of Lorn','income':95,'garrison':190,'pop':19000},
-    'Orkney':         {'earl':'Magnus, Jarl of Orkney','income':55,'garrison':90,'pop':9000},
-    'Moray':          {'earl':'Alexander Comyn','income':140,'garrison':190,'pop':30000},
-    'Strathearn':     {'earl':'Malise II of Strathearn','income':145,'garrison':180,'pop':32000},
-    'Fife':           {'earl':'Malcolm, Earl of Fife','income':160,'garrison':180,'pop':36000},
-    'Lothian':        {'earl':'Crown Direct (Alexander II)','income':215,'garrison':250,'pop':46000},
-    'Borders':        {'earl':'Walter Comyn','income':115,'garrison':190,'pop':25000},
-    'Strathclyde':    {'earl':'Maldouen, Earl of Lennox','income':185,'garrison':210,'pop':40000},
-    'Galloway':       {'earl':'Dervorguilla of Galloway','income':125,'garrison':175,'pop':27000},
-}
-
-DUCHY_DATA = {
-    # ENGLISH DUCHIES
-    'lancaster':   {'name':'Duchy of Lancaster','color':'#5a1212','lord':'Richard of Cornwall'},
-    'chester':     {'name':'Earldom of Chester','color':'#3a1050','lord':'John de Lacy'},
-    'march':       {'name':'Welsh Marches','color':'#3a2800','lord':'Wm. de Cantilupe'},
-    'gloucester':  {'name':'Duchy of Gloucester','color':'#122a60','lord':'Roger Bigod'},
-    'norfolk':     {'name':'Earldom of Norfolk','color':'#4a3200','lord':'Hugh Bigod'},
-    'cornwall':    {'name':'Duchy of Cornwall','color':'#0e4028','lord':'Richard de Clare'},
-    # WELSH DUCHIES — Welsh dragon green family
-    'gwynedd':     {'name':'Kingdom of Gwynedd','color':'#1f5024','lord':'Llywelyn ap Gruffudd'},
-    'deheubarth':  {'name':'Kingdom of Deheubarth','color':'#2e6024','lord':'Maredudd ap Owain'},
-    'morgannwg':   {'name':'Lordship of Morgannwg','color':'#5a3818','lord':'Richard de Clare'},   # Marcher brown
-    # SCOTTISH DUCHIES — Scottish blue/slate family
-    'highlands':   {'name':'Earldom of Ross & Isles','color':'#244266','lord':'William, Earl of Ross'},
-    'moray':       {'name':'Earldom of Moray','color':'#1a3a5a','lord':'Alexander Comyn'},
-    'lothian':     {'name':'Crown Lands of Lothian','color':'#4a4a14','lord':'Alexander II'},  # royal gold
-}
+# ── DESIGN DATA HAS MOVED ────────────────────────────────────────────────────
+# Lord names, baseline income, garrison size, population — all the
+# hand-authored "game design" numbers — now live in data/gb_design.json,
+# generated by extract_design.py. Run that script when you want to change
+# values; this pipeline writes geometry-only output.
+#
+# (Kept the original COUNTY_DATA / DUCHY_DATA dicts below commented out for
+# reference until the design file is verified working end-to-end. Strip
+# when comfortable.)
+# Design data (lord names, baseline income, garrison size, population,
+# fertility, harvest curves) now lives in data/gb_design.json — see
+# extract_design.py. This script emits geometry only.
 
 # ── MERGE LADs INTO HISTORIC COUNTIES ──────────────────────────────────────────
 # At this point each arc has ALREADY been projected and simplified once.
@@ -438,16 +371,16 @@ for cn, raw_rings in county_polys_raw.items():
 # the LAD-level polygons per duchy we get the TRUE perimeter, drawn exactly
 # along duchy-to-duchy and duchy-to-sea boundaries.
 duchy_polys = {}  # duchy_id → list of merged outer rings
-for did in DUCHY_DATA.keys():
-    member_counties = [cn for cn, code_list_unused in []]  # placeholder, populated below
-# Build duchy → counties map by reverse-lookup through LAD_TO_DUCHY.
+# Build duchy → counties map by reverse-lookup through LAD_TO_DUCHY. This
+# is the only place we still iterate "all known duchies" — derived from
+# LAD assignments, not from DUCHY_DATA which has moved to gb_design.json.
 _duchy_to_counties = defaultdict(list)
 for code, dchy in LAD_TO_DUCHY.items():
     cn = LAD_TO_COUNTY.get(code)
     if cn and cn not in _duchy_to_counties[dchy]:
         _duchy_to_counties[dchy].append(cn)
 
-for did, dd in DUCHY_DATA.items():
+for did in _duchy_to_counties.keys():
     duchy_sh_polys = []
     for cn in _duchy_to_counties.get(did, []):
         for ring in county_polys.get(cn, []):
@@ -577,13 +510,12 @@ output = {
     "adjacency": {},
 }
 
-for dk, dd in DUCHY_DATA.items():
-    out_counties = [cn for cn, duchy in 
-        {cn: LAD_TO_DUCHY.get(list(LAD_TO_COUNTY.keys())[list(LAD_TO_COUNTY.values()).index(cn)]) 
-         for cn in county_polys.keys()
-         if cn in LAD_TO_COUNTY.values()}.items()
-        if duchy == dk]
-    # Simpler: collect counties belonging to this duchy
+# Geometry-only output. Per the new split, all design data (lord names,
+# economy, fertility, harvest curves) lives in data/gb_design.json — see
+# extract_design.py. DesignData.gd merges it back over the MapData dicts at
+# load time, so downstream callers don't have to know about the split.
+DUCHY_IDS = sorted({d for d in LAD_TO_DUCHY.values()})
+for dk in DUCHY_IDS:
     dk_counties = set()
     for code, duchy in LAD_TO_DUCHY.items():
         if duchy == dk:
@@ -591,15 +523,9 @@ for dk, dd in DUCHY_DATA.items():
             if cn and cn in county_polys:
                 dk_counties.add(cn)
     output["duchies"][dk] = {
-        "name": dd["name"],
-        "color": dd["color"],
-        "lord": dd["lord"],
         "counties": sorted(dk_counties),
-        # Pre-computed union of all constituent county polygons. The renderer
-        # uses this for the THICK duchy-boundary lines and for placing the
-        # curved duchy label, instead of approximating from per-county data.
         "polygons": duchy_polys.get(dk, []),
-        "center": centroid(duchy_polys.get(dk, [])),
+        "center":   centroid(duchy_polys.get(dk, [])),
     }
 
 for cn, polys in county_polys.items():
@@ -608,37 +534,13 @@ for cn, polys in county_polys.items():
         if c == cn:
             duchy = LAD_TO_DUCHY.get(code)
             break
-    cd = COUNTY_DATA.get(cn, {})
     center = centroid(polys)
-    
-    # Economy calculations
-    pop = cd.get('pop', 10000)
-    income = cd.get('income', 100)
-    prosperity = min(10, income / 38)
-    merchants = int(pop / 7000 * (prosperity / 3))
-    guilds = merchants // 3
-    tithe = round(income * 0.1)
-    
     output["counties"][cn] = {
-        "name": cn,
-        "duchy": duchy or "unknown",
-        "earl": cd.get("earl", "Unknown"),
-        "income": income,
-        "garrison": cd.get("garrison", 100),
-        "population": pop,
-        "center": {"x": center[0], "y": center[1]},
+        "duchy":    duchy or "unknown",
+        "center":   {"x": center[0], "y": center[1]},
         "polygons": polys,
-        # Third-layer subdivisions (one per source LAD). Names come straight
-        # from LAD13NM; rename in COUNTY_DATA-style overrides later.
+        # Third-tier subdivisions — one per source LAD.
         "baronies": baronies_by_county.get(cn, []),
-        "economy": {
-            "prosperity": round(prosperity, 1),
-            "merchants": merchants,
-            "guilds": guilds,
-            "tithe": tithe,
-            "has_cathedral": tithe >= 28 and pop >= 45000,
-            "has_monastery": tithe >= 14 and pop >= 22000,
-        }
     }
     output["adjacency"][cn] = sorted(adjacency.get(cn, set()))
 

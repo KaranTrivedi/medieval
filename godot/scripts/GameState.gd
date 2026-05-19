@@ -2,7 +2,7 @@
 # Autoload singleton — owns the SQLite-backed mutable game state.
 #
 # DATA SPLIT
-#   res://data/bg_godot.json  — IMMUTABLE map geometry/topology (MapData)
+#   res://data/gb_godot.json  — IMMUTABLE map geometry/topology (MapData)
 #   user://current.db              — LIVE working save (auto-resumes)
 #   user://saves/slot*.db          — explicit checkpoints from the Save button
 #
@@ -15,87 +15,41 @@ const SCHEMA_VERSION := 2
 const WORKING_DB := "user://current.db"
 const SAVES_DIR  := "user://saves/"
 
-# Maps duchy id (from bg_godot.json) to faction id. The data file only
-# carries duchies; factions are a higher-level grouping we control here.
-# Note: Welsh "morgannwg" is held by Norman Marcher lords loyal to England,
-# so it belongs to the English faction at game start despite being on Welsh
-# soil — this matches the historical 1247 setting.
-const FACTIONS_BY_DUCHY := {
-	# English duchies
-	"lancaster":  "england",
-	"chester":    "england",
-	"march":      "england",
-	"gloucester": "england",
-	"norfolk":    "england",
-	"cornwall":   "england",
-	# Welsh duchies
-	"gwynedd":    "wales",
-	"deheubarth": "wales",
-	"morgannwg":  "england",   # Marcher lords swore to the English crown
-	# Scottish duchies
-	"highlands":  "scotland",
-	"moray":      "scotland",
-	"lothian":    "scotland",
-	# Legacy fallbacks for v1 saves predating the subdivision
-	"wales":      "wales",
-	"scotland":   "scotland",
-}
+# Design-data source-of-truth lookups. The actual values used to live as
+# const dicts here; they've been moved to data/gb_design.json (loaded by
+# the DesignData autoload). These accessors return the live design data,
+# falling back to safe minimal defaults if the autoload hasn't loaded yet.
 
-const FACTION_SEED := [
-	{"id": "england",  "name": "Kingdom of England",   "color_hex": "#c8102e", "treasury": 2500},
-	{"id": "wales",    "name": "Principality of Wales","color_hex": "#00693e", "treasury": 600},
-	{"id": "scotland", "name": "Kingdom of Scotland",  "color_hex": "#005eb8", "treasury": 900},
-]
+func _factions_by_duchy() -> Dictionary:
+	if DesignData.loaded:
+		return DesignData.factions_by_duchy
+	# Minimal fallback so a missing design file doesn't crash autoload.
+	return {"lancaster": "england", "wales": "wales", "scotland": "scotland"}
 
-# Baseline fertility per duchy. Counties inherit their duchy's value as a
-# starting point and get small per-county Gaussian noise on top. Tunable
-# without re-seeding existing saves (only used during _seed for new games).
-#   1.00 = baseline / median expectation
-#   1.20 = breadbasket (East Anglia / Kent — heavy clay loams, mild winters)
-#   0.80 = harsh climate or upland (Northumberland, mountainous Wales)
-#   0.65 = poor agricultural land (Highlands)
-const FERTILITY_BY_DUCHY := {
-	"lancaster":  0.82,   # Yorkshire grade, harsher in Northumberland
-	"chester":    0.95,   # Midlands average
-	"march":      0.88,   # Welsh Marches, hilly border
-	"gloucester": 1.08,   # Severn vale, Cotswold sheep country
-	"norfolk":    1.22,   # the English breadbasket
-	"cornwall":   1.00,   # mixed: rich Somerset to thin Devon
-	"gwynedd":    0.78,   # Welsh mountains, hard farming
-	"powys":      0.82,   # Welsh midlands
-	"deheubarth": 0.92,   # south-Welsh river valleys
-	"glamorgan":  0.95,   # south-Welsh coastal plain
-	"highlands":  0.65,   # north-Scottish uplands
-	"moray":      0.85,   # north-east coastal Scotland
-	"strathearn": 0.92,   # central Scottish lowlands (Perthshire, Fife)
-	"lothian":    1.05,   # Edinburgh hinterland, best Scottish farmland
-	"galloway":   0.82,   # south-west Scotland, pastoral
-	# Legacy fallback duchies left from the v1 monolithic Wales/Scotland — only
-	# referenced if a save predates the LAD subdivision regen.
-	"wales":      0.85,
-	"scotland":   0.70,
-}
 
-# Default seasonal harvest distributions, used to seed harvest_params on a
-# fresh DB. Mutable in-game via set_harvest_params() so climate events can
-# shift them. Mean/std_dev/min/max are MULTIPLIERS applied to a county's
-# (base_income × fertility).
-#
-# Why this shape:
-#   Spring (planting)  — light cashflow from Lenten markets and animal stock
-#   Summer (growth)    — wool shearing, modest income
-#   Autumn (harvest)   — the year's main grain income with high Gaussian variance
-#   Winter (storage)   — stored goods, fines, scant trade
-#
-# Across one year the sum totals ≈ 2.1× base income on average, matching the
-# "3× seed planted" historical norm in Project.md §10 (where 1× of base is
-# already factored into the static income figures).
-const DEFAULT_HARVEST_PARAMS := [
-	{"season": 0, "mean": 0.20, "std_dev": 0.05, "min_val": 0.10, "max_val": 0.40, "description": "Spring — planting, light cashflow"},
-	{"season": 1, "mean": 0.30, "std_dev": 0.08, "min_val": 0.15, "max_val": 0.60, "description": "Summer — pasturage and wool"},
-	{"season": 2, "mean": 1.50, "std_dev": 0.45, "min_val": 0.50, "max_val": 3.00, "description": "Autumn — main grain harvest"},
-	{"season": 3, "mean": 0.10, "std_dev": 0.04, "min_val": 0.00, "max_val": 0.25, "description": "Winter — stored goods and fines"},
-]
+func _faction_seed() -> Array:
+	if DesignData.loaded:
+		return DesignData.faction_seed
+	return [{"id": "england", "name": "England", "color_hex": "#c8102e", "treasury": 1000}]
+
+
+func _fertility_by_duchy() -> Dictionary:
+	if DesignData.loaded:
+		return DesignData.fertility_by_duchy
+	return {}
+
+
+func _default_harvest_params() -> Array:
+	if DesignData.loaded:
+		return DesignData.default_harvest_params
+	# Minimal flat distribution — keeps end_turn() functional in the
+	# unlikely case that DesignData failed to load.
+	return [
+		{"season": 0, "mean": 0.5, "std_dev": 0.1, "min_val": 0.2, "max_val": 1.0, "description": "default"},
+		{"season": 1, "mean": 0.5, "std_dev": 0.1, "min_val": 0.2, "max_val": 1.0, "description": "default"},
+		{"season": 2, "mean": 0.5, "std_dev": 0.1, "min_val": 0.2, "max_val": 1.0, "description": "default"},
+		{"season": 3, "mean": 0.5, "std_dev": 0.1, "min_val": 0.2, "max_val": 1.0, "description": "default"},
+	]
 
 var db: SQLite = null
 var player_faction_id: String = "england"
@@ -490,7 +444,7 @@ func _migrate_to_v2() -> void:
 	#    (somehow) doesn't overwrite player-tuned values.
 	db.query("SELECT COUNT(*) AS c FROM harvest_params;")
 	if int(db.query_result[0]["c"]) == 0:
-		for p in DEFAULT_HARVEST_PARAMS:
+		for p in _default_harvest_params():
 			db.query_with_bindings(
 				"INSERT OR IGNORE INTO harvest_params(season, mean, std_dev, min_val, max_val, description) VALUES(?,?,?,?,?,?);",
 				[p.season, p.mean, p.std_dev, p.min_val, p.max_val, p.description]
@@ -504,7 +458,10 @@ func _migrate_to_v2() -> void:
 # noise (σ=0.08), clamped to [0.4, 1.6]. Counties whose duchy isn't in the
 # table fall back to 1.0.
 func _seed() -> void:
-	for f in FACTION_SEED:
+	var factions_by_duchy: Dictionary = _factions_by_duchy()
+	var fertility_by_duchy: Dictionary = _fertility_by_duchy()
+
+	for f in _faction_seed():
 		db.query_with_bindings(
 			"INSERT OR IGNORE INTO factions(id, name, color_hex, treasury) VALUES(?,?,?,?);",
 			[f.id, f.name, f.color_hex, f.treasury]
@@ -513,9 +470,9 @@ func _seed() -> void:
 	for cname in MapData.counties:
 		var co: Dictionary = MapData.counties[cname]
 		var duchy: String = co.get("duchy", "")
-		var owner: String = FACTIONS_BY_DUCHY.get(duchy, "england")
+		var owner: String = factions_by_duchy.get(duchy, "england")
 		var garrison: int = int(co.get("garrison", 0))
-		var base_fertility: float = FERTILITY_BY_DUCHY.get(duchy, 1.0)
+		var base_fertility: float = fertility_by_duchy.get(duchy, 1.0)
 		var fertility: float = clampf(
 			GaussianSystem.sample(base_fertility, 0.08),
 			0.4, 1.6
@@ -525,14 +482,12 @@ func _seed() -> void:
 			[cname, owner, garrison, fertility, 0]
 		)
 
-	# For older DBs that arrived here via the v1→v2 migration, the ALTER set
-	# every existing row's fertility to 1.0. Back-fill those with the proper
-	# duchy-derived value. WHERE fertility = 1.0 is a heuristic that may
-	# touch rows the user manually set to 1.0 — acceptable at seed time.
+	# Back-fill fertility on v1→v2 migrated rows that were left at the
+	# default 1.0 — the duchy-derived value reads more meaningfully.
 	for cname in MapData.counties:
 		var co: Dictionary = MapData.counties[cname]
 		var duchy: String = co.get("duchy", "")
-		var base_fertility: float = FERTILITY_BY_DUCHY.get(duchy, 1.0)
+		var base_fertility: float = fertility_by_duchy.get(duchy, 1.0)
 		var fertility: float = clampf(
 			GaussianSystem.sample(base_fertility, 0.08),
 			0.4, 1.6

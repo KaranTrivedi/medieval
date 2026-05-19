@@ -86,6 +86,11 @@ func _ready() -> void:
 	db_btn.pressed.connect(_on_db_browser_pressed)
 	vbox.add_child(db_btn)
 
+	var hier_btn := Button.new()
+	hier_btn.text = "Realm Hierarchy"
+	hier_btn.pressed.connect(_on_hierarchy_pressed)
+	vbox.add_child(hier_btn)
+
 	var menu_btn := Button.new()
 	menu_btn.text = "Quit to Main Menu"
 	menu_btn.pressed.connect(_on_main_menu_pressed)
@@ -139,6 +144,15 @@ func _on_db_browser_pressed() -> void:
 		browser.visible = not browser.visible
 		if browser.visible and browser.has_method("_refresh_tables"):
 			browser._refresh_tables()
+
+
+# Toggle the cascading Country→Duchy→County→Barony hierarchy panel.
+func _on_hierarchy_pressed() -> void:
+	var panel := get_node_or_null("../CascadingPanel")
+	if panel != null:
+		panel.visible = not panel.visible
+		if panel.visible and panel.has_method("refresh_tree"):
+			panel.refresh_tree()
 
 
 # Slider drag handler. Writes back to MapSettings (which persists + emits
