@@ -656,7 +656,7 @@ The trebuchet is the king of siege weapons in this era:
 **Goal:** Verify the core loop is fun before building complexity.
 
 **Deliverables:**
-- Clickable Godot 4 campaign map (37 counties, real geographic boundaries)
+- Clickable Godot 4 campaign map (55 counties, real geographic boundaries)
 - Basic turn system (4 seasons per year, income collection)
 - Two playable factions (England + France or England vs internal barons)
 - Simple combat (army movement, auto-resolve with Gaussian outcomes)
@@ -665,8 +665,14 @@ The trebuchet is the king of siege weapons in this era:
 - Treasury tracking
 - Win condition (capture enemy capital or achieve stability threshold)
 
-Implement new game/load/delete existing game view. 
+Text labels dont fit inside the regions. Either curve the text or wrap, especially at duchy level.
+    This seems resolved.
+Clicking at different levels should select the corresponding duchy, county, barony. 
+We can have another overlay showing cities, castles, fiefs/key resources/mansions.
+Implement new game/load/delete existing game view.
+
 Also add in the chronicle tab, Information about end turns, whether there was a good harvest etc etc needs to be recorded with color codes in the logs.
+Need a table showing all baronaries , counties etc. in a cascading table. two tables needed, one by ownership, another by not owned. Show all related stats.
 Is there any way I can traverse the sqlite databases? I would like to be able the view the entries and tables etc.Also I added a sprite2D layer, I would like it to fit the background correctly. we can deal with that later if its too complicated.
 
 **Out of scope for Phase 1:**

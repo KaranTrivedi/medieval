@@ -160,6 +160,7 @@ func _on_map_settings_changed() -> void:
 	_last_border_zoom = -1.0
 	_update_label_visibility()
 	_update_border_widths()
+	#build_map()
 
 
 # Frame the camera on the full polygon bounding box, leaving room on the

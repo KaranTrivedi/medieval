@@ -357,31 +357,34 @@ func build_labels(parent: Node2D, world_scale: Vector2 = Vector2(4, 4)) -> void:
 		var size_for_fit: int = _fit_font_size(cn, max_axis, 52, 18)
 		parent.add_child(_make_curved_label(cn, ring, county_centres[cn], size_for_fit, "county", ang, max_axis))
 
-	# DUCHY LABELS — centroid is the unweighted mean of member-county centres.
-	# Rotation comes from PCA on those centres (so a long thin duchy gets
-	# diagonal text). Duchy with a single county falls back to its county's angle.
-	var duchy_points: Dictionary = {}              # did -> Array[Vector2]
-	for cn in counties:
-		var did = counties[cn].get("duchy", "")
-		if did == "":
+	# DUCHY LABELS — placed along the unioned duchy polygon's principal axis,
+	# curved like county labels. Uses the duchy's largest pre-computed ring
+	# (from duchies[did].polygons in bg_godot.json).
+	for did in duchies:
+		var d_polys_raw: Array = duchies[did].get("polygons", [])
+		# Pick the largest ring as the label's anchor polygon.
+		var biggest := PackedVector2Array()
+		for ring_raw in d_polys_raw:
+			if ring_raw.size() > biggest.size():
+				var tmp := PackedVector2Array()
+				for pt in ring_raw:
+					tmp.append(Vector2(pt[0], pt[1]) * world_scale)
+				if tmp.size() > biggest.size():
+					biggest = tmp
+		if biggest.is_empty():
 			continue
-		var arr: Array = duchy_points.get(did, [])
-		arr.append(county_centres[cn])
-		duchy_points[did] = arr
-	for did in duchy_points:
-		var pts: Array = duchy_points[did]
-		var sum := Vector2.ZERO
-		for p in pts: sum += p
-		var centroid := sum / float(pts.size())
-		var pv := PackedVector2Array(pts)
-		var ang := _compute_label_rotation(pv) if pts.size() >= 3 else 0.0
-		var name: String = str(duchies.get(did, {}).get("name", did)).to_upper()
-		parent.add_child(_make_label(name, centroid, 88, "duchy", ang))
+		var centre_arr = duchies[did].get("center", [0, 0])
+		var d_centre := Vector2(centre_arr[0], centre_arr[1]) * world_scale
+		var ang := _compute_label_rotation(biggest)
+		var max_axis: float = _axis_extent(biggest, ang)
+		var name: String = str(duchies[did].get("name", did)).to_upper()
+		var size_for_fit: int = _fit_font_size(name, max_axis, 88, 22)
+		parent.add_child(_make_curved_label(name, biggest, d_centre, size_for_fit, "duchy", ang, max_axis))
 
-	# COUNTRY LABELS — England / Scotland / Wales. Centroid is average of all
-	# member-county centres. No rotation (always horizontal: these are the
-	# zoomed-out anchor labels and need to read at a glance).
-	var country_points: Dictionary = {}            # name -> Array[Vector2]
+	# COUNTRY LABELS — England / Scotland / Wales. Centroid is the average of
+	# all member-county centres, no rotation (kept horizontal for the
+	# fully-zoomed-out anchor read).
+	var country_points: Dictionary = {}
 	for cn in counties:
 		var did = counties[cn].get("duchy", "")
 		var country: String = COUNTRY_BY_DUCHY.get(did, "")
@@ -466,9 +469,10 @@ func _axis_extent(points: PackedVector2Array, angle: float) -> float:
 	return hi - lo
 
 
-# Pick a font size such that the rendered label fits within `max_axis` world
-# units along the principal axis. Margin is built in so the text doesn't
-# kiss the polygon edges.
+# Pick a font size such that the actual rendered text fits within `max_axis`
+# world units along the principal axis. Uses Font.get_string_size for real
+# glyph metrics (not an approximation) so wide names like "Worcestershire"
+# get the right size in narrow counties.
 #
 # Args:
 #   text (String): the label string.
@@ -480,12 +484,20 @@ func _axis_extent(points: PackedVector2Array, angle: float) -> float:
 func _fit_font_size(text: String, max_axis: float, nominal: int, minimum: int) -> int:
 	if text.length() == 0 or max_axis <= 0.0:
 		return nominal
-	# Same factor used in _make_label (Garamond glyph half-width per pt).
-	const W_FACTOR := 0.27
-	const SAFETY := 0.80    # only use 80% of the polygon's axis extent
+	if _font_serif == null:
+		_font_serif = load(FONT_PATH_SERIF)
+	const SAFETY := 0.85    # use 85% of the polygon's axis extent
 	var allowed_width: float = max_axis * SAFETY
-	var fit: int = int(allowed_width / (W_FACTOR * float(text.length()) * 2.0))
-	return clampi(fit, minimum, nominal)
+	# Measure at the nominal size, then scale down linearly. Text width is
+	# essentially linear in font_size for raster sizes far from a font's
+	# hinted breakpoints — accurate enough for label sizing.
+	var w_at_nominal: float = _font_serif.get_string_size(
+		text, HORIZONTAL_ALIGNMENT_LEFT, -1, nominal
+	).x
+	if w_at_nominal <= allowed_width:
+		return nominal
+	var scaled: int = int(float(nominal) * allowed_width / w_at_nominal)
+	return clampi(scaled, minimum, nominal)
 
 
 # Helper: build one styled Label centred on world_pos, tagged with its zoom band.
@@ -528,6 +540,10 @@ var _font_serif: Font = null
 # centerline-bend of the polygon. The returned Node2D is tagged with the
 # zoom band so CampaignMap's LOD switch still finds it.
 #
+# Character spacing uses Font.get_string_size on each character so spacing
+# matches the actual rendered glyph widths (previous approximation made
+# small-county labels look squashed).
+#
 # Args:
 #   text (String): the label text (e.g. "Yorkshire").
 #   ring (PackedVector2Array): polygon's largest ring (world coords).
@@ -545,51 +561,70 @@ func _make_curved_label(text: String, ring: PackedVector2Array, centre: Vector2,
 	if text.length() == 0 or axis_length <= 0.0:
 		return container
 
-	# Build bezier control points.
+	# Build bezier control points spanning ~90% of the polygon's axis. We
+	# don't fit the curve to the text — instead we measure the text in the
+	# real font and lay characters along the curve from a centred start
+	# offset, so spacing always matches actual glyph widths.
 	var dir := Vector2(cos(axis_angle), sin(axis_angle))
 	var perp := Vector2(-dir.y, dir.x)
-	# Use 70% of the axis for text so the label doesn't hug the polygon edge.
-	var half_len: float = axis_length * 0.35
+	var half_len: float = axis_length * 0.45
 	var p0: Vector2 = centre - dir * half_len
 	var p2: Vector2 = centre + dir * half_len
 	# Centerline bend at axis midpoint, capped so the curve never gets goofy.
 	var bend: float = _centerline_bend(ring, centre, dir, perp)
 	bend = clampf(bend, -axis_length * 0.20, axis_length * 0.20)
-	# Quadratic bezier passes through (P0 + 2P1 + P2)/4 at t=0.5; with
-	# (P0 + P2)/2 = centre, requiring the midpoint of the curve to land at
-	# centre + perp*bend gives P1 = centre + perp*(2*bend).
+	# Quadratic bezier midpoint = (P0 + 2P1 + P2)/4; we want it at centre+perp*bend.
 	var p1: Vector2 = centre + perp * (bend * 2.0)
 
-	# Ensure the font resource is loaded once.
+	# Ensure font is loaded.
 	if _font_serif == null:
 		_font_serif = load(FONT_PATH_SERIF)
 
-	# Approximate per-character pen advance, used for spacing along the curve.
-	# For Garamond SemiBold this is roughly 0.50 of the font size for caps,
-	# 0.42 for mixed case. We use 0.46 as a workable average.
-	var char_pen: float = font_size * 0.46
-	# Approximate the bezier's arc length by sampling — proper integration
-	# would be overkill for label placement.
-	var arc_len: float = _bezier_approx_length(p0, p1, p2, 16)
-	# How much of the curve do we actually want to use? Just enough for the
-	# text width, centred on t=0.5.
-	var text_width: float = char_pen * float(text.length() - 1)
-	var coverage: float = clampf(text_width / max(arc_len, 1.0), 0.05, 1.0)
-	var t_start: float = 0.5 - coverage * 0.5
-	var t_step: float = (coverage) / max(1.0, float(text.length() - 1))
+	# Measure each character with the actual font for accurate advance widths.
+	# This is THE fix for "letters look meshed" — Garamond glyph widths vary
+	# significantly (W/M wide, i/l narrow) and the old uniform 0.46-of-font_size
+	# approximation under-spaced wide letters and over-spaced narrow ones.
+	var char_widths: Array = []     # parallel to text — float per character
+	var total_text_w: float = 0.0
+	for i in range(text.length()):
+		var ch: String = text.substr(i, 1)
+		var w: float = _font_serif.get_string_size(ch, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x
+		char_widths.append(w)
+		total_text_w += w
 
-	var half_w_char: float = font_size * 0.27
+	# Build a piecewise-linear arc-length → t lookup so we can position each
+	# character by its cumulative width (the actual visual progression along
+	# the curve), not just by a uniform t. The curve is sampled densely.
+	const ARC_SAMPLES := 32
+	var sample_pts: Array = []      # PackedVector2Array of sampled points
+	var cum_len: Array = []         # float of cumulative arc length at each sample
+	var prev: Vector2 = p0
+	sample_pts.append(prev)
+	cum_len.append(0.0)
+	for k in range(1, ARC_SAMPLES + 1):
+		var t: float = float(k) / float(ARC_SAMPLES)
+		var pt: Vector2 = _bez(p0, p1, p2, t)
+		sample_pts.append(pt)
+		cum_len.append(cum_len[k - 1] + prev.distance_to(pt))
+		prev = pt
+	var arc_len: float = cum_len[cum_len.size() - 1]
+
+	# Centre the text along the arc. start_offset = arc midpoint - text/2.
+	var start_offset: float = max(0.0, arc_len * 0.5 - total_text_w * 0.5)
+
 	var half_h_char: float = font_size * 0.55
-
+	var cumulative: float = 0.0
 	for i in range(text.length()):
 		var ch: String = text.substr(i, 1)
 		if ch == " ":
+			cumulative += char_widths[i]
 			continue
-		var t: float = t_start + t_step * float(i) if text.length() > 1 else 0.5
+		# Sample point at the centre of this character.
+		var target_len: float = start_offset + cumulative + char_widths[i] * 0.5
+		var t: float = _t_at_arclen(cum_len, target_len)
 		var pos: Vector2 = _bez(p0, p1, p2, t)
 		var tan: Vector2 = _bez_tangent(p0, p1, p2, t)
 		var angle: float = atan2(tan.y, tan.x)
-		# Wrap to readable range so chars never appear upside-down.
 		while angle >  PI * 0.5: angle -= PI
 		while angle < -PI * 0.5: angle += PI
 
@@ -600,11 +635,41 @@ func _make_curved_label(text: String, ring: PackedVector2Array, centre: Vector2,
 		lbl.add_theme_color_override("font_color", Color(0.96, 0.93, 0.80))
 		lbl.add_theme_color_override("font_outline_color", Color(0.04, 0.02, 0.00, 1.0))
 		lbl.add_theme_constant_override("outline_size", maxi(3, int(font_size * 0.09)))
+		var half_w_char: float = char_widths[i] * 0.5
 		lbl.position = pos - Vector2(half_w_char, half_h_char)
 		lbl.pivot_offset = Vector2(half_w_char, half_h_char)
 		lbl.rotation = angle
 		container.add_child(lbl)
+		cumulative += char_widths[i]
 	return container
+
+
+# Look up the bezier `t` parameter that produces a given arc length, using
+# a piecewise-linear cumulative-length table built by _make_curved_label.
+# Linear interpolation between adjacent samples — fine for our resolution.
+func _t_at_arclen(cum_len: Array, target: float) -> float:
+	if cum_len.size() < 2:
+		return 0.5
+	var total: float = cum_len[cum_len.size() - 1]
+	if target <= 0.0:
+		return 0.0
+	if target >= total:
+		return 1.0
+	# Binary search for the interval containing `target`.
+	var lo: int = 0
+	var hi: int = cum_len.size() - 1
+	while hi - lo > 1:
+		var mid: int = (lo + hi) / 2
+		if cum_len[mid] <= target:
+			lo = mid
+		else:
+			hi = mid
+	var seg_len: float = cum_len[hi] - cum_len[lo]
+	var alpha: float = 0.0
+	if seg_len > 0.0:
+		alpha = (target - cum_len[lo]) / seg_len
+	var n: int = cum_len.size() - 1
+	return (float(lo) + alpha) / float(n)
 
 
 # Quadratic bezier evaluation: (1-t)²·P0 + 2(1-t)t·P1 + t²·P2.
