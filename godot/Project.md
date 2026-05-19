@@ -665,8 +665,9 @@ The trebuchet is the king of siege weapons in this era:
 - Treasury tracking
 - Win condition (capture enemy capital or achieve stability threshold)
 
-Text labels dont fit inside the regions. Either curve the text or wrap, especially at duchy level.
-    This seems resolved.
+Text labels mostly fit inside the regions. Either curve the text or wrap, dont curve the text if it fits.
+Add the baronies.
+
 Clicking at different levels should select the corresponding duchy, county, barony. 
 We can have another overlay showing cities, castles, fiefs/key resources/mansions.
 Implement new game/load/delete existing game view.

@@ -77,6 +77,7 @@ func build_map():
 	print("Building polygons...")
 	MapData.build_county_polygons(county_layer, Vector2(4, 4))
 	MapData.build_county_borders(border_layer, Vector2(4, 4))
+	MapData.build_baronies(border_layer, label_layer, Vector2(4, 4))
 	MapData.build_labels(label_layer, Vector2(4, 4))
 
 	var polygon_count = 0
@@ -116,6 +117,10 @@ func _update_border_widths() -> void:
 		if child is Line2D:
 			var target_px: float = float(child.get_meta("screen_px", 1.0))
 			(child as Line2D).width = target_px / z
+		elif child.has_method("refresh"):
+			# DashedPolygon recomputes its world-unit width on its own at
+			# draw time using camera zoom; we just need to ask it to redraw.
+			child.refresh()
 
 
 # Update Label visibility based on camera zoom. Only iterates children when
@@ -144,13 +149,22 @@ func _update_label_visibility() -> void:
 	var want_country := (band == 0)
 	var want_duchy   := (band == 1)
 	var want_county  := (band == 2)
-	# (fief band reserved — no labels at that tier yet)
+	var want_barony  := (band == 3)
 	for child in label_layer.get_children():
 		var t := str(child.get_meta("zoom_band", ""))
 		match t:
 			"country": child.visible = want_country
 			"duchy":   child.visible = want_duchy
 			"county":  child.visible = want_county
+			"barony":  child.visible = want_barony
+	# BorderLayer hosts solid barony lines ("barony") at deep-zoom, plus
+	# dashed barony hints ("barony_dashed") that appear one tier earlier
+	# (county band). Everything else stays visible.
+	for child in border_layer.get_children():
+		var tb := str(child.get_meta("zoom_band", ""))
+		match tb:
+			"barony":         child.visible = want_barony
+			"barony_dashed":  child.visible = want_county
 
 
 # Called when MapSettings emits `changed`. Force-refresh visibility and
@@ -218,13 +232,15 @@ func _unhandled_input(event: InputEvent) -> void:
 					_left_press_pos = mb.position
 					_left_dragged = false
 				else:
-					# Release. If we never crossed the drag threshold, treat as
-					# a click and select the county under the cursor. Empty-
-					# space clicks do NOT clear — use Escape for that.
+					# Release. If we never crossed the drag threshold, treat
+					# as a click. Hit on a county → select it. Empty space
+					# (and Escape) both clear the current selection.
 					if not _left_dragged:
 						var hit := _county_polygon_at(get_global_mouse_position())
 						if hit:
 							_select_county(hit.get_meta("county_name", ""))
+						else:
+							_clear_selection()
 			MOUSE_BUTTON_MIDDLE:
 				_is_panning = mb.pressed
 			MOUSE_BUTTON_WHEEL_UP:

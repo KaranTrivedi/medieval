@@ -307,6 +307,95 @@ func build_county_borders(parent: Node2D, world_scale: Vector2 = Vector2(4, 4)) 
 	print("MapData: Built %d county outlines + %d duchy outlines." % [county_count, duchy_count])
 
 
+# Build barony outlines + labels for the deepest zoom band. Outlines go to
+# `border_parent` (same layer as county/duchy lines, tagged with screen_px so
+# the zoom-aware rescaler picks them up). Labels go to `label_parent`.
+#
+# Each barony comes from a single LAD polygon already cleaned by shapely in
+# convert_to_godot.py — they tile their county with no gaps or overlaps.
+# Outlines use a softer brown so they read as "below county" in the hierarchy.
+#
+# Args:
+#   border_parent (Node2D): typically BorderLayer.
+#   label_parent (Node2D): typically LabelLayer.
+#   world_scale (Vector2): same scale as everything else.
+# Returns: void
+func build_baronies(border_parent: Node2D, label_parent: Node2D, world_scale: Vector2 = Vector2(4, 4)) -> void:
+	const BARONY_BORDER_COLOR := Color(0.18, 0.13, 0.07, 0.80)
+	# Target screen-pixel width for barony outlines — fixed (not on a slider)
+	# because they only appear at very deep zoom so users will mostly see the
+	# absolute thinnest possible hairline.
+	const BARONY_BORDER_PX := 0.6
+
+	var border_count := 0
+	var dashed_count := 0
+	var label_count := 0
+	const DashedPoly := preload("res://scripts/DashedPolygon.gd")
+	for cn in counties:
+		var co: Dictionary = counties[cn]
+		var bs: Array = co.get("baronies", [])
+		for b in bs:
+			var b_rings: Array = b.get("polygons", [])
+			# Two parallel sets of outlines per barony:
+			#   - DASHED (zoom_band "barony_dashed") shown at COUNTY band as
+			#     subtle subdivision hints inside each county.
+			#   - SOLID  (zoom_band "barony")        shown at BARONY band
+			#     when the player has zoomed in past the county tier.
+			for ring_raw in b_rings:
+				if ring_raw.size() < 4:
+					continue
+				var ring := PackedVector2Array()
+				for pt in ring_raw:
+					ring.append(Vector2(pt[0], pt[1]) * world_scale)
+				if ring.size() < 4:
+					continue
+				# Solid version
+				var line := Line2D.new()
+				line.points = ring
+				line.closed = true
+				line.default_color = BARONY_BORDER_COLOR
+				line.joint_mode = Line2D.LINE_JOINT_BEVEL
+				line.antialiased = false
+				line.set_meta("screen_px", BARONY_BORDER_PX)
+				line.set_meta("zoom_band", "barony")
+				line.visible = false
+				border_parent.add_child(line)
+				border_count += 1
+				# Dashed hint version (shown at COUNTY zoom band only)
+				var dashed := DashedPoly.new()
+				dashed.polygon = ring
+				dashed.color = BARONY_BORDER_COLOR
+				dashed.screen_px = BARONY_BORDER_PX
+				dashed.set_meta("zoom_band", "barony_dashed")
+				dashed.visible = false
+				border_parent.add_child(dashed)
+				dashed_count += 1
+			# LABEL — at barony centre, sized to fit largest ring.
+			var c: Array = b.get("center", [0, 0])
+			var b_centre := Vector2(c[0], c[1]) * world_scale
+			# Find largest ring for axis-fitting math.
+			var biggest := PackedVector2Array()
+			for ring_raw in b_rings:
+				if ring_raw.size() > biggest.size():
+					var tmp := PackedVector2Array()
+					for pt in ring_raw:
+						tmp.append(Vector2(pt[0], pt[1]) * world_scale)
+					if tmp.size() > biggest.size():
+						biggest = tmp
+			if biggest.is_empty():
+				continue
+			var b_ang := _compute_label_rotation(biggest)
+			var b_axis: float = _axis_extent(biggest, b_ang)
+			var b_name: String = str(b.get("name", b.get("id", "")))
+			var b_size: int = _fit_font_size(b_name, b_axis, 22, 11)
+			var b_label: Node = _make_curved_label(b_name, biggest, b_centre, b_size, "barony", b_ang, b_axis)
+			b_label.visible = false
+			label_parent.add_child(b_label)
+			label_count += 1
+
+	print("MapData: Built %d solid + %d dashed barony outlines + %d labels." % [border_count, dashed_count, label_count])
+
+
 # Maps a duchy id to the political/geographic country its land sits in.
 # Used to drive the COUNTRY-tier labels at outermost zoom.
 const COUNTRY_BY_DUCHY := {
@@ -347,9 +436,9 @@ func build_labels(parent: Node2D, world_scale: Vector2 = Vector2(4, 4)) -> void:
 				biggest = r
 		county_largest_ring[cn] = biggest
 
-	# COUNTY LABELS — drawn as a curved per-character string that follows
-	# the polygon's principal axis. Font size scales down so the label
-	# always fits inside the polygon's axis extent.
+	# COUNTY LABELS — always curved. Conditional straight-vs-curved looked
+	# worse in practice: county labels mid-zoom-out got truncated when the
+	# polygon was narrow. Curving uses bezier arc length for more room.
 	for cn in counties:
 		var ring: PackedVector2Array = county_largest_ring[cn]
 		var ang := _compute_label_rotation(ring)
@@ -378,8 +467,8 @@ func build_labels(parent: Node2D, world_scale: Vector2 = Vector2(4, 4)) -> void:
 		var ang := _compute_label_rotation(biggest)
 		var max_axis: float = _axis_extent(biggest, ang)
 		var name: String = str(duchies[did].get("name", did)).to_upper()
-		var size_for_fit: int = _fit_font_size(name, max_axis, 88, 22)
-		parent.add_child(_make_curved_label(name, biggest, d_centre, size_for_fit, "duchy", ang, max_axis))
+		var d_size: int = _fit_font_size(name, max_axis, 88, 24)
+		parent.add_child(_make_curved_label(name, biggest, d_centre, d_size, "duchy", ang, max_axis))
 
 	# COUNTRY LABELS — England / Scotland / Wales. Centroid is the average of
 	# all member-county centres, no rotation (kept horizontal for the
@@ -484,8 +573,7 @@ func _axis_extent(points: PackedVector2Array, angle: float) -> float:
 func _fit_font_size(text: String, max_axis: float, nominal: int, minimum: int) -> int:
 	if text.length() == 0 or max_axis <= 0.0:
 		return nominal
-	if _font_serif == null:
-		_font_serif = load(FONT_PATH_SERIF)
+	_ensure_font_loaded()
 	const SAFETY := 0.85    # use 85% of the polygon's axis extent
 	var allowed_width: float = max_axis * SAFETY
 	# Measure at the nominal size, then scale down linearly. Text width is
@@ -509,8 +597,7 @@ func _make_label(text: String, world_pos: Vector2, font_size: int, band: String,
 	var lbl := Label.new()
 	lbl.text = text
 
-	if _font_serif == null:
-		_font_serif = load(FONT_PATH_SERIF)
+	_ensure_font_loaded()
 	if _font_serif != null:
 		lbl.add_theme_font_override("font", _font_serif)
 
@@ -532,6 +619,60 @@ func _make_label(text: String, world_pos: Vector2, font_size: int, band: String,
 # EB Garamond SemiBold for every tier.
 const FONT_PATH_SERIF := "res://assets/fonts/EB_Garamond,UnifrakturMaguntia/EB_Garamond/static/EBGaramond-SemiBold.ttf"
 var _font_serif: Font = null
+
+
+# Load (and configure) the label font on first use. We flip the FontFile to
+# **MSDF rendering** so glyphs stay crisp when the camera zooms in past the
+# point where the rasterised bitmap would normally upscale and blur. Also
+# enables subpixel positioning for cleaner anti-aliasing at small sizes.
+func _ensure_font_loaded() -> void:
+	if _font_serif != null:
+		return
+	_font_serif = load(FONT_PATH_SERIF)
+	if _font_serif is FontFile:
+		var ff: FontFile = _font_serif
+		ff.multichannel_signed_distance_field = true
+		# Auto: Godot chooses based on glyph size. AUTO=1 in the enum.
+		ff.subpixel_positioning = TextServer.SUBPIXEL_POSITIONING_AUTO
+
+
+# Choose straight vs curved label rendering automatically:
+#   - If the text fits along the polygon's axis at the NOMINAL size, use a
+#     straight (single Label) rotation — much cheaper, no character meshing.
+#   - If shrinking to fit produces a still-readable size (>= minimum × 1.2),
+#     use a straight label at that shrunk size.
+#   - Otherwise, fall through to the curved per-character renderer which
+#     uses the bezier's arc length to gain more room.
+#
+# Args:
+#   text (String): label text.
+#   ring (PackedVector2Array): polygon's largest ring for PCA + curve shape.
+#   centre (Vector2): polygon centroid in world coords.
+#   nominal (int): preferred max font size.
+#   minimum (int): font-size floor when shrinking.
+#   band (String): zoom band tag.
+#   axis_angle (float): rotation angle in radians.
+#   axis_length (float): polygon extent along axis (world units).
+# Returns:
+#   Node: a Label or a Node2D container of per-character Labels.
+func _make_label_auto(text: String, ring: PackedVector2Array, centre: Vector2,
+		nominal: int, minimum: int, band: String, axis_angle: float, axis_length: float) -> Node:
+	_ensure_font_loaded()
+	# Margin so text doesn't kiss the polygon edges.
+	var allowed: float = axis_length * 0.85
+	# Does it fit straight at the nominal size?
+	var w_nominal: float = _font_serif.get_string_size(
+		text, HORIZONTAL_ALIGNMENT_LEFT, -1, nominal
+	).x
+	if w_nominal <= allowed:
+		return _make_label(text, centre, nominal, band, axis_angle)
+	# Try a shrunk straight version. Only use it if the shrunk size stays
+	# readable; otherwise we'd rather curve and keep the font legible.
+	var shrunk: int = _fit_font_size(text, axis_length, nominal, minimum)
+	if shrunk >= int(float(minimum) * 1.2):
+		return _make_label(text, centre, shrunk, band, axis_angle)
+	# Last resort: curve it (uses bezier arc length, more room for chars).
+	return _make_curved_label(text, ring, centre, shrunk, band, axis_angle, axis_length)
 
 
 # Build a curved label: each character is a separate Label placed along a
@@ -577,8 +718,7 @@ func _make_curved_label(text: String, ring: PackedVector2Array, centre: Vector2,
 	var p1: Vector2 = centre + perp * (bend * 2.0)
 
 	# Ensure font is loaded.
-	if _font_serif == null:
-		_font_serif = load(FONT_PATH_SERIF)
+	_ensure_font_loaded()
 
 	# Measure each character with the actual font for accurate advance widths.
 	# This is THE fix for "letters look meshed" — Garamond glyph widths vary

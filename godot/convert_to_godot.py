@@ -467,6 +467,57 @@ for did, dd in DUCHY_DATA.items():
         merged_duchy = make_valid(merged_duchy)
     duchy_polys[did] = _shapely_to_rings(merged_duchy)
 
+
+# ── BARONIES (per-LAD polygons under each county) ─────────────────────────────
+# The county-level polygons are the unioned shape. To support the third
+# political layer ("barony"), we re-walk the geom list and store EACH LAD
+# as its own barony record, keeping the LAD13NM as the barony name. LADs
+# are the smallest unit our source data ships at; further subdivision into
+# fiefs/manors/castles will be point data (future work).
+baronies_by_county = defaultdict(list)   # county_name → list of barony dicts
+for geom in geoms:
+    code = geom["properties"]["LAD13CD"]
+    cn = LAD_TO_COUNTY.get(code)
+    if not cn:
+        continue
+    raw_rings = []
+    for ring in geometry_to_polygons(geom):
+        if len(ring) >= 3:
+            raw_rings.append([list(p) for p in ring])
+    if not raw_rings:
+        continue
+    # Clean topology with shapely so the LAD's polygon is render-safe.
+    sh_polys = []
+    for r in raw_rings:
+        try:
+            p = ShPoly(r)
+            if not p.is_valid:
+                p = p.buffer(0)
+            if p.is_valid and not p.is_empty and p.area > 0:
+                sh_polys.append(p)
+        except Exception:
+            continue
+    if not sh_polys:
+        continue
+    merged = unary_union(sh_polys).buffer(0)
+    if not merged.is_valid:
+        merged = make_valid(merged)
+    rings = _shapely_to_rings(merged)
+    if not rings:
+        continue
+    # Centroid for label placement.
+    all_pts = [p for r in rings for p in r]
+    if not all_pts:
+        continue
+    cx = round(sum(p[0] for p in all_pts) / len(all_pts), 2)
+    cy = round(sum(p[1] for p in all_pts) / len(all_pts), 2)
+    baronies_by_county[cn].append({
+        "id":       code,
+        "name":     geom["properties"].get("LAD13NM", code),
+        "polygons": rings,
+        "center":   [cx, cy],
+    })
+
 # ── COMPUTE CENTROIDS ──────────────────────────────────────────────────────────
 def centroid(polygons):
     """Compute centroid from all polygon points."""
@@ -577,6 +628,9 @@ for cn, polys in county_polys.items():
         "population": pop,
         "center": {"x": center[0], "y": center[1]},
         "polygons": polys,
+        # Third-layer subdivisions (one per source LAD). Names come straight
+        # from LAD13NM; rename in COUNTY_DATA-style overrides later.
+        "baronies": baronies_by_county.get(cn, []),
         "economy": {
             "prosperity": round(prosperity, 1),
             "merchants": merchants,

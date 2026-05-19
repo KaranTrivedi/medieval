@@ -128,6 +128,13 @@ func _ready() -> void:
 # Returns: void
 func new_game(player_id: String) -> void:
 	player_faction_id = player_id
+	# Critical: close the existing SQLite handle BEFORE deleting the file.
+	# Windows locks the file while it's open, so remove_absolute silently
+	# fails and the "new game" inherits the old turn count + treasury.
+	# Closing first releases the lock so the delete actually succeeds.
+	if db != null:
+		db.close_db()
+		db = null
 	if FileAccess.file_exists(WORKING_DB):
 		DirAccess.remove_absolute(WORKING_DB)
 	_open(WORKING_DB)
