@@ -328,7 +328,7 @@ DUCHY_DATA = {
 # geometry_to_polygons(geom) returns coord lists assembled from those shared
 # arcs — so neighbouring counties end up with point-identical shared edges.
 from collections import defaultdict
-county_polys = defaultdict(list)  # county_name → list of polygon rings
+county_polys_raw = defaultdict(list)  # county_name → list of LAD-level polygon rings
 
 for geom in geoms:
     code = geom["properties"]["LAD13CD"]
@@ -337,7 +337,97 @@ for geom in geoms:
         continue
     for ring in geometry_to_polygons(geom):
         if len(ring) >= 3:
-            county_polys[county].append([list(p) for p in ring])
+            county_polys_raw[county].append([list(p) for p in ring])
+
+# Use shapely to UNION all LAD polygons within each county. This eliminates
+# internal LAD boundaries (Yorkshire was visibly showing them) and produces
+# clean, topology-correct county shapes. unary_union is robust to:
+#   - shared edges between adjacent LADs (welds them seamlessly)
+#   - sub-pixel mismatches that Godot's Geometry2D.merge_polygons couldn't handle
+#   - holes and disjoint pieces (returns MultiPolygon when a county has islands)
+from shapely.geometry import Polygon as ShPoly, MultiPolygon, Point
+from shapely.ops import unary_union
+from shapely.validation import make_valid
+
+def _shapely_to_rings(geom):
+    """Flatten a shapely Polygon/MultiPolygon into a list of [[x,y],...] rings
+    (outer shells only). Holes are dropped — they're features of the polygon's
+    interior, not separate landmasses, and Godot's Polygon2D doesn't render them
+    anyway in our setup.
+
+    Coords are rounded to 2 decimal places (0.01 of a coordinate unit). 1dp
+    was occasionally causing self-intersections after rounding (the
+    Gloucestershire / Essex bug); 2dp keeps the data compact while leaving
+    enough precision to preserve topology."""
+    rings = []
+    if geom.is_empty:
+        return rings
+    if geom.geom_type == "Polygon":
+        polys = [geom]
+    elif geom.geom_type == "MultiPolygon":
+        polys = list(geom.geoms)
+    else:
+        return rings
+    for p in polys:
+        coords = list(p.exterior.coords)
+        if len(coords) >= 2 and coords[0] == coords[-1]:
+            coords = coords[:-1]
+        if len(coords) < 3:
+            continue
+        rounded = [[round(x, 2), round(y, 2)] for x, y in coords]
+        # Defensive: rebuild the polygon from rounded coords and run make_valid
+        # if it still tripped a self-intersection. If make_valid produces a
+        # MultiPolygon (rare), take the largest piece — outliers are usually
+        # zero-area slivers that Godot wouldn't render anyway.
+        try:
+            check = ShPoly(rounded)
+            if not check.is_valid:
+                fixed = make_valid(check)
+                if fixed.geom_type == "Polygon":
+                    rc = list(fixed.exterior.coords)
+                    if len(rc) >= 2 and rc[0] == rc[-1]:
+                        rc = rc[:-1]
+                    rounded = [[round(x, 2), round(y, 2)] for x, y in rc]
+                elif fixed.geom_type == "MultiPolygon":
+                    biggest = max(fixed.geoms, key=lambda g: g.area)
+                    rc = list(biggest.exterior.coords)
+                    if len(rc) >= 2 and rc[0] == rc[-1]:
+                        rc = rc[:-1]
+                    rounded = [[round(x, 2), round(y, 2)] for x, y in rc]
+        except Exception:
+            pass
+        if len(rounded) >= 3:
+            rings.append(rounded)
+    return rings
+
+county_polys = {}     # county_name → list of merged outer rings (one per landmass)
+for cn, raw_rings in county_polys_raw.items():
+    sh_polys = []
+    for r in raw_rings:
+        try:
+            p = ShPoly(r)
+            # buffer(0) is the canonical shapely trick to clean up self-intersecting
+            # / invalid polygons. Necessary because a few LAD rings have minor
+            # topology issues after arc projection.
+            if not p.is_valid:
+                p = p.buffer(0)
+            if not p.is_empty and p.area > 0:
+                sh_polys.append(p)
+        except Exception:
+            continue
+    if not sh_polys:
+        county_polys[cn] = []
+        continue
+    # unary_union typically returns a valid geometry, BUT subsequent rounding
+    # of the exterior coords to 2dp can re-introduce self-intersections at
+    # tight neck-points (Gloucestershire and Essex were both hitting this).
+    # buffer(0) is shapely's canonical "scrub topology" trick — combined
+    # with make_valid as a belt-and-braces fallback it produces output that
+    # survives the round trip to the JSON.
+    merged = unary_union(sh_polys).buffer(0)
+    if not merged.is_valid:
+        merged = make_valid(merged)
+    county_polys[cn] = _shapely_to_rings(merged)
 
 # ── COMPUTE CENTROIDS ──────────────────────────────────────────────────────────
 def centroid(polygons):

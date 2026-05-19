@@ -219,7 +219,10 @@ func build_county_polygons(parent: Node2D, world_scale: Vector2 = Vector2(4, 4))
 		for i in range(polys.size()):
 			if polys[i] == largest_ring:
 				continue
-			if polys[i].size() < 5:
+			# Was: skip rings < 5 pts. Lowered to 3 (= valid triangle) so
+			# small islands aren't dropped entirely. The dedup in get_polygons
+			# already removes degenerate cases.
+			if polys[i].size() < 3:
 				continue
 			var extra = Polygon2D.new()
 			extra.name = cn.replace(" ", "_") + "_part" + str(i)
@@ -233,52 +236,28 @@ func build_county_polygons(parent: Node2D, world_scale: Vector2 = Vector2(4, 4))
 	print("MapData: Built %d county Polygon2D nodes." % count)
 
 
-# Draw outlines around every county. Adjacent same-duchy counties share the
-# same fill colour, so without borders they read as one blob.
+# Draw ONE outline per county. The bg_godot.json data file has already
+# unioned each county's LADs via shapely (in convert_to_godot.py), so we just
+# render whatever polygon rings the data hands us — no in-engine merging.
 #
-# We do two passes:
-#   1. THIN county lines (every county, dark brown).
-#   2. THICK duchy lines (only counties that touch a different duchy, slightly
-#      different colour, drawn on TOP of the county lines so duchy boundaries
-#      visually dominate.
-#
-# Note the duchy pass is an approximation: a duchy-edge county gets its WHOLE
-# outline thickened, not just the edge facing the other duchy. To do the
-# precise version we'd union all county polygons per duchy with
-# Geometry2D.merge_polygons and trace the union outline — heavier and only
-# worth it if the approximation reads wrong in playtest.
+# Two width tiers, both stored as desired SCREEN pixels rather than world
+# units. CampaignMap rescales each Line2D every time the zoom changes so the
+# lines look the same thickness no matter how close you are. The "screen_px"
+# meta on each Line2D is what CampaignMap reads.
 #
 # Args:
 #   parent (Node2D): typically the BorderLayer node from CampaignMap.tscn.
 #   world_scale (Vector2): same scale used in build_county_polygons.
 # Returns: void
 func build_county_borders(parent: Node2D, world_scale: Vector2 = Vector2(4, 4)) -> void:
-	const COUNTY_BORDER_COLOR := Color(0.08, 0.05, 0.02, 0.90)
-	const COUNTY_BORDER_WIDTH := 4.0
-	const DUCHY_BORDER_COLOR  := Color(0.02, 0.01, 0.00, 1.00)
-	const DUCHY_BORDER_WIDTH  := 12.0
-	const MIN_RING_PTS := 4
+	const COUNTY_BORDER_COLOR := Color(0.10, 0.07, 0.03, 0.85)
+	const COUNTY_BORDER_PX    := 1.0     # county outline target = 1 px on screen
+	const DUCHY_BORDER_COLOR  := Color(0.00, 0.00, 0.00, 1.00)
+	const DUCHY_BORDER_PX     := 5.5     # duchy outline target = 5.5 px on screen (5.5× county)
 
-	var county_lines := 0
-	var duchy_lines := 0
+	var thin_pass: Array = []
+	var thick_pass: Array = []
 
-	# Pass 1: thin county outlines for every ring of every county.
-	for cn in counties:
-		var polys := get_polygons(cn, world_scale)
-		for ring in polys:
-			if ring.size() < MIN_RING_PTS:
-				continue
-			var line := Line2D.new()
-			line.points = ring
-			line.closed = true
-			line.width = COUNTY_BORDER_WIDTH
-			line.default_color = COUNTY_BORDER_COLOR
-			line.joint_mode = Line2D.LINE_JOINT_ROUND
-			parent.add_child(line)
-			county_lines += 1
-
-	# Pass 2: thicker duchy outlines, only for counties that border a different
-	# duchy. Drawn after the thin pass so they layer on top.
 	for cn in counties:
 		var co: Dictionary = counties[cn]
 		var my_duchy: String = co.get("duchy", "")
@@ -287,78 +266,212 @@ func build_county_borders(parent: Node2D, world_scale: Vector2 = Vector2(4, 4)) 
 			if str(counties.get(nb_cn, {}).get("duchy", "")) != my_duchy:
 				on_duchy_edge = true
 				break
-		if not on_duchy_edge:
-			continue
-		var polys := get_polygons(cn, world_scale)
-		for ring in polys:
-			if ring.size() < MIN_RING_PTS:
-				continue
-			var line := Line2D.new()
-			line.points = ring
-			line.closed = true
-			line.width = DUCHY_BORDER_WIDTH
-			line.default_color = DUCHY_BORDER_COLOR
-			line.joint_mode = Line2D.LINE_JOINT_ROUND
-			parent.add_child(line)
-			duchy_lines += 1
+		var target_pass: Array = thick_pass if on_duchy_edge else thin_pass
+		for ring in get_polygons(cn, world_scale):
+			if ring.size() >= 4:
+				target_pass.append(ring)
 
-	print("MapData: Built %d county borders + %d duchy borders." % [county_lines, duchy_lines])
+	# Thin lines first so thick duchy lines render on top of them.
+	for ring in thin_pass:
+		var line := Line2D.new()
+		line.points = ring
+		line.closed = true
+		line.default_color = COUNTY_BORDER_COLOR
+		line.joint_mode = Line2D.LINE_JOINT_ROUND
+		line.set_meta("screen_px", COUNTY_BORDER_PX)
+		parent.add_child(line)
+	# Thick duchy lines on top of the thin ones.
+	for ring in thick_pass:
+		var line := Line2D.new()
+		line.points = ring
+		line.closed = true
+		line.default_color = DUCHY_BORDER_COLOR
+		line.joint_mode = Line2D.LINE_JOINT_ROUND
+		line.set_meta("screen_px", DUCHY_BORDER_PX)
+		parent.add_child(line)
+
+	print("MapData: Built %d thin + %d thick border outlines." % [thin_pass.size(), thick_pass.size()])
 
 
-# Place duchy-level and county-level labels in the given LabelLayer. Each
-# label is created once with its zoom-band stored as metadata; CampaignMap
-# toggles visibility based on the camera zoom.
+# Maps a duchy id to the political/geographic country its land sits in.
+# Used to drive the COUNTRY-tier labels at outermost zoom.
+const COUNTRY_BY_DUCHY := {
+	"lancaster":  "England",
+	"chester":    "England",
+	"march":      "England",
+	"gloucester": "England",
+	"norfolk":    "England",
+	"cornwall":   "England",
+	"gwynedd":    "Wales",
+	"deheubarth": "Wales",
+	"morgannwg":  "Wales",   # geographically Welsh even though held by Marcher lords
+	"highlands":  "Scotland",
+	"moray":      "Scotland",
+	"lothian":    "Scotland",
+}
+
+
+# Place country / duchy / county labels in the LabelLayer. Each label is
+# tagged with its zoom band via metadata; CampaignMap.gd toggles visibility.
 #
 # Args:
 #   parent (Node2D): typically the LabelLayer node from CampaignMap.tscn.
 #   world_scale (Vector2): same scale as the polygons.
 # Returns: void
 func build_labels(parent: Node2D, world_scale: Vector2 = Vector2(4, 4)) -> void:
-	# County labels: at each county's stored centre.
+	# Per-county centroid + collected ring points so PCA can find each
+	# region's principal axis. We keep the largest ring's vertices because
+	# small islands distort the major-axis calculation.
+	var county_centres: Dictionary = {}            # cn -> Vector2
+	var county_largest_ring: Dictionary = {}       # cn -> PackedVector2Array
 	for cn in counties:
-		var co: Dictionary = counties[cn]
-		var c = co.get("center", {"x": 0, "y": 0})
-		var pos := Vector2(c["x"], c["y"]) * world_scale
-		parent.add_child(_make_label(cn, pos, 36, "county"))
+		var c = counties[cn].get("center", {"x": 0, "y": 0})
+		county_centres[cn] = Vector2(c["x"], c["y"]) * world_scale
+		var biggest := PackedVector2Array()
+		for r in get_polygons(cn, world_scale):
+			if r.size() > biggest.size():
+				biggest = r
+		county_largest_ring[cn] = biggest
 
-	# Duchy labels: at the average of member counties' centres. This is a
-	# rough centroid — fine for label placement. Drawn larger so they read
-	# clearly when zoomed out.
-	var duchy_sums: Dictionary = {}   # duchy_id → {sum: Vector2, n: int}
+	# COUNTY LABELS — rotated to follow the long axis of the county's main ring.
+	# EB Garamond serif at this tier, bumped to 52 so it stays readable when
+	# zoomed in only a little past the county-band threshold.
 	for cn in counties:
-		var co: Dictionary = counties[cn]
-		var did = co.get("duchy", "")
+		var ang := _compute_label_rotation(county_largest_ring[cn])
+		parent.add_child(_make_label(cn, county_centres[cn], 52, "county", ang))
+
+	# DUCHY LABELS — centroid is the unweighted mean of member-county centres.
+	# Rotation comes from PCA on those centres (so a long thin duchy gets
+	# diagonal text). Duchy with a single county falls back to its county's angle.
+	var duchy_points: Dictionary = {}              # did -> Array[Vector2]
+	for cn in counties:
+		var did = counties[cn].get("duchy", "")
 		if did == "":
 			continue
-		var c = co.get("center", {"x": 0, "y": 0})
-		var pos := Vector2(c["x"], c["y"]) * world_scale
-		var bucket: Dictionary = duchy_sums.get(did, {"sum": Vector2.ZERO, "n": 0})
-		bucket.sum += pos
-		bucket.n += 1
-		duchy_sums[did] = bucket
-
-	for did in duchy_sums:
-		var bucket: Dictionary = duchy_sums[did]
-		var centroid: Vector2 = bucket.sum / float(bucket.n)
+		var arr: Array = duchy_points.get(did, [])
+		arr.append(county_centres[cn])
+		duchy_points[did] = arr
+	for did in duchy_points:
+		var pts: Array = duchy_points[did]
+		var sum := Vector2.ZERO
+		for p in pts: sum += p
+		var centroid := sum / float(pts.size())
+		var pv := PackedVector2Array(pts)
+		var ang := _compute_label_rotation(pv) if pts.size() >= 3 else 0.0
 		var name: String = str(duchies.get(did, {}).get("name", did)).to_upper()
-		parent.add_child(_make_label(name, centroid, 64, "duchy"))
+		parent.add_child(_make_label(name, centroid, 88, "duchy", ang))
 
-	print("MapData: Built %d labels." % parent.get_child_count())
+	# COUNTRY LABELS — England / Scotland / Wales. Centroid is average of all
+	# member-county centres. No rotation (always horizontal: these are the
+	# zoomed-out anchor labels and need to read at a glance).
+	var country_points: Dictionary = {}            # name -> Array[Vector2]
+	for cn in counties:
+		var did = counties[cn].get("duchy", "")
+		var country: String = COUNTRY_BY_DUCHY.get(did, "")
+		if country == "":
+			continue
+		var arr: Array = country_points.get(country, [])
+		arr.append(county_centres[cn])
+		country_points[country] = arr
+	for country in country_points:
+		var pts: Array = country_points[country]
+		var sum := Vector2.ZERO
+		for p in pts: sum += p
+		var centroid := sum / float(pts.size())
+		parent.add_child(_make_label(country.to_upper(), centroid, 140, "country", 0.0))
+
+	print("MapData: Built %d labels (country+duchy+county)." % parent.get_child_count())
+
+
+# Compute the rotation angle to apply to a label so its baseline follows the
+# polygon's long axis. Uses the closed-form major eigenvector of the 2x2
+# covariance matrix of the points around their centroid.
+#
+# The result is wrapped into [-π/4, π/4] so labels never appear upside-down
+# or rotated more than 45° — readability over geometric fidelity.
+#
+# Args:
+#   points (PackedVector2Array): vertices to take PCA over. Pass the largest
+#       polygon ring of the region.
+# Returns:
+#   float: rotation in radians, in [-π/4, π/4].
+func _compute_label_rotation(points: PackedVector2Array) -> float:
+	var n := points.size()
+	if n < 3:
+		return 0.0
+	var cx := 0.0
+	var cy := 0.0
+	for p in points:
+		cx += p.x
+		cy += p.y
+	cx /= float(n)
+	cy /= float(n)
+
+	var sxx := 0.0
+	var sxy := 0.0
+	var syy := 0.0
+	for p in points:
+		var dx: float = p.x - cx
+		var dy: float = p.y - cy
+		sxx += dx * dx
+		sxy += dx * dy
+		syy += dy * dy
+
+	# Closed-form major eigenvector angle: ½·atan2(2·Sxy, Sxx - Syy).
+	# Add ε to the denom to avoid atan2(0, 0) when both are zero.
+	var angle: float = 0.5 * atan2(2.0 * sxy, (sxx - syy) + 1e-9)
+	# Wrap into [-π/2, π/2] (eigenvectors are ± symmetric)
+	while angle >  PI * 0.5: angle -= PI
+	while angle < -PI * 0.5: angle += PI
+	# Clamp to a readability-safe ±45°
+	return clampf(angle, -PI * 0.25, PI * 0.25)
 
 
 # Helper: build one styled Label centred on world_pos, tagged with its zoom band.
-# Centring is approximate (offset by half a guesstimated text width) because
-# Label.size isn't computed until the node enters the tree.
-func _make_label(text: String, world_pos: Vector2, font_size: int, band: String) -> Label:
+# Picks the font per tier:
+#   country / duchy → UnifrakturMaguntia (heavy blackletter, big headers)
+#   county          → EB Garamond SemiBold (serif, much more readable at smaller sizes)
+#
+# Rotation is applied via pivot_offset so text rotates about its centre.
+# Centring is approximate (no Label.size until in tree) but tuned for the
+# font's glyph-width characteristics.
+func _make_label(text: String, world_pos: Vector2, font_size: int, band: String, rotation: float = 0.0) -> Label:
 	var lbl := Label.new()
 	lbl.text = text
+
+	# Pick font + per-font centring factor. Blackletter glyphs are wider than
+	# serif at the same point size, so the half-width estimate differs.
+	var use_blackletter: bool = (band == "country" or band == "duchy")
+	var font: Font = _font_blackletter if use_blackletter else _font_serif
+	var glyph_w_factor: float = 0.34 if use_blackletter else 0.27
+	if font == null:
+		# Lazy-load the chosen font on first request.
+		if use_blackletter:
+			_font_blackletter = load(FONT_PATH_BLACKLETTER)
+			font = _font_blackletter
+		else:
+			_font_serif = load(FONT_PATH_SERIF)
+			font = _font_serif
+	if font != null:
+		lbl.add_theme_font_override("font", font)
+
 	lbl.add_theme_font_size_override("font_size", font_size)
-	lbl.add_theme_color_override("font_color", Color(0.95, 0.92, 0.78))
-	lbl.add_theme_color_override("font_outline_color", Color(0.05, 0.03, 0.01, 0.95))
-	lbl.add_theme_constant_override("outline_size", 4)
-	# Approximate centring: half-char-width × text length. Tweakable.
-	var est_half_w: float = font_size * 0.28 * float(text.length())
+	lbl.add_theme_color_override("font_color", Color(0.96, 0.93, 0.80))
+	lbl.add_theme_color_override("font_outline_color", Color(0.04, 0.02, 0.00, 1.0))
+	# Outline thickness scales with font size so big labels keep their stroke.
+	lbl.add_theme_constant_override("outline_size", maxi(4, int(font_size * 0.10)))
+
+	var est_half_w: float = font_size * glyph_w_factor * float(text.length())
 	var est_half_h: float = font_size * 0.55
 	lbl.position = world_pos - Vector2(est_half_w, est_half_h)
+	lbl.pivot_offset = Vector2(est_half_w, est_half_h)
+	lbl.rotation = rotation
 	lbl.set_meta("zoom_band", band)
 	return lbl
+
+
+# Font paths + cached resources. Loaded on first label of each kind.
+const FONT_PATH_BLACKLETTER := "res://assets/fonts/EB_Garamond,UnifrakturMaguntia/UnifrakturMaguntia/UnifrakturMaguntia-Regular.ttf"
+const FONT_PATH_SERIF       := "res://assets/fonts/EB_Garamond,UnifrakturMaguntia/EB_Garamond/static/EBGaramond-SemiBold.ttf"
+var _font_blackletter: Font = null
+var _font_serif: Font = null

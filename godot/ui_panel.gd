@@ -26,7 +26,7 @@ func _ready() -> void:
 #
 # Returns: void
 func clear_panel() -> void:
-	county_name_label.text = "Select a County"
+	county_name_label.text = "-"
 	duchy_label.text = "—"
 	earl_label.text = "—"
 	income_label.text = "— £/yr"
@@ -45,7 +45,7 @@ func clear_panel() -> void:
 # Returns: void
 func update_panel(county_data: Dictionary, county_name: String) -> void:
 	print("Updating panel for: " + county_name)
-	county_name_label.text = county_name.replace("_", " ")
+	county_name_label.text = county_name.replace("county", "-")
 	duchy_label.text = county_data.get("duchy", "—").capitalize()
 	earl_label.text = county_data.get("earl", "—")
 

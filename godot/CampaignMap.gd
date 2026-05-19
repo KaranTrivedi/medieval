@@ -6,12 +6,20 @@ extends Node2D
 @onready var camera: Camera2D = $Camera2D
 @onready var ui: CanvasLayer = $UI
 
-# Zoom thresholds for the label LOD system.
-#   z < ZOOM_DUCHY_MAX        → only DUCHY-tier labels visible
-#   ZOOM_DUCHY_MAX..ZOOM_FIEF → only COUNTY-tier labels visible
-#   z >= ZOOM_FIEF            → (future) fief/city labels visible
-const ZOOM_DUCHY_MAX := 0.22
-const ZOOM_FIEF := 1.5
+# Zoom thresholds for the label LOD system. Four tiers — at any one time at
+# most ONE tier is visible (mutually exclusive).
+#
+# Bands widened so each label tier has plenty of headroom before swapping:
+# the default fit-to-bounds zoom is ~0.135 and lands in DUCHY; you can wheel
+# in roughly 4× before COUNTY appears, and another 6× before FIEF.
+#
+#   z < ZOOM_COUNTRY_MAX      → COUNTRY (England / Scotland / Wales)
+#   ZOOM_COUNTRY_MAX..ZOOM_DUCHY_MAX → DUCHY
+#   ZOOM_DUCHY_MAX..ZOOM_COUNTY_MAX  → COUNTY
+#   z >= ZOOM_COUNTY_MAX      → (future) FIEF / city / castle
+const ZOOM_COUNTRY_MAX := 0.07
+const ZOOM_DUCHY_MAX   := 0.55
+const ZOOM_COUNTY_MAX  := 3.5
 
 # Tint applied to all Polygon2D nodes that share the currently-selected county
 # name. Multiplied with their base colour, so values >1 brighten.
@@ -50,6 +58,12 @@ var _left_dragged: bool = false
 #   0 = duchy band, 1 = county band, 2 = fief band
 var _last_zoom_band: int = -1
 
+# Last zoom value at which we rescaled Line2D widths. We only rescale when the
+# zoom changes by more than a small relative threshold to avoid touching ~600
+# Line2D nodes every single frame for sub-pixel jitter.
+var _last_border_zoom: float = -1.0
+const BORDER_RESCALE_REL := 0.02   # 2% zoom delta triggers a rescale
+
 func _ready():
 	print("=== _ready() START ===")
 	if MapData.is_loaded:
@@ -83,34 +97,65 @@ func build_map():
 	camera.make_current()
 	fit_to_bounds()
 	_update_label_visibility()
+	_update_border_widths()
 	print("Camera: position=%v, zoom=%v" % [camera.position, camera.zoom])
 	print("=== build_map() END ===")
 
 
-# Update Label visibility based on the camera's current zoom. Only iterates
-# children when the zoom band changes (cheap to call every frame).
+# Rescale every Line2D in BorderLayer so its width measured in SCREEN pixels
+# matches the per-line target stored in meta("screen_px"). Line2D.width is in
+# world units, so we convert: world_width = screen_px / camera.zoom.
+#
+# Skipped when zoom hasn't changed enough to matter — avoids touching ~600
+# Line2D nodes every frame for sub-pixel jitter.
+#
+# Returns: void
+func _update_border_widths() -> void:
+	var z: float = camera.zoom.x
+	if z <= 0.0:
+		return
+	if _last_border_zoom > 0.0:
+		var rel: float = abs(z - _last_border_zoom) / _last_border_zoom
+		if rel < BORDER_RESCALE_REL:
+			return
+	_last_border_zoom = z
+	for child in border_layer.get_children():
+		if child is Line2D:
+			var target_px: float = float(child.get_meta("screen_px", 1.0))
+			(child as Line2D).width = target_px / z
+
+
+# Update Label visibility based on camera zoom. Only iterates children when
+# the zoom crosses a band threshold (cheap to call every frame).
+#
+# Bands:
+#   0 = country, 1 = duchy, 2 = county, 3 = fief
 #
 # Returns: void
 func _update_label_visibility() -> void:
 	var z := camera.zoom.x
 	var band: int
-	if z < ZOOM_DUCHY_MAX:
+	if z < ZOOM_COUNTRY_MAX:
 		band = 0
-	elif z < ZOOM_FIEF:
+	elif z < ZOOM_DUCHY_MAX:
 		band = 1
-	else:
+	elif z < ZOOM_COUNTY_MAX:
 		band = 2
+	else:
+		band = 3
 	if band == _last_zoom_band:
 		return
 	_last_zoom_band = band
-	var want_duchy := (band == 0)
-	var want_county := (band == 1)
+	var want_country := (band == 0)
+	var want_duchy   := (band == 1)
+	var want_county  := (band == 2)
+	# (fief band reserved — no labels at that tier yet)
 	for child in label_layer.get_children():
 		var t := str(child.get_meta("zoom_band", ""))
-		if t == "duchy":
-			child.visible = want_duchy
-		elif t == "county":
-			child.visible = want_county
+		match t:
+			"country": child.visible = want_country
+			"duchy":   child.visible = want_duchy
+			"county":  child.visible = want_county
 
 
 # Frame the camera on the full polygon bounding box, leaving room on the
@@ -219,6 +264,7 @@ func _process(delta: float) -> void:
 	if dir != Vector2.ZERO:
 		camera.position += dir.normalized() * PAN_KEY_PIXELS_PER_SEC * delta / camera.zoom
 	_update_label_visibility()
+	_update_border_widths()
 
 
 # Zoom toward (or away from) the world point currently under the mouse cursor.

@@ -117,7 +117,7 @@ theme_override_constants/separation = 12
 
 [node name="CountyName" type="Label" parent="UI/Control/InfoPanel/VBoxContainer" unique_id=1775943899]
 layout_mode = 2
-text = "Select a County"
+text = "County"
 label_settings = SubResource("LabelSettings_1")
 
 [node name="DuchySection" type="HBoxContainer" parent="UI/Control/InfoPanel/VBoxContainer" unique_id=1755789090]

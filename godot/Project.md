@@ -665,7 +665,9 @@ The trebuchet is the king of siege weapons in this era:
 - Treasury tracking
 - Win condition (capture enemy capital or achieve stability threshold)
 
-Implement new game/load/delete existing game view. How are duchies and counties defined? Are counties a subset of duchies? Also add in the chronicle tab, Information about end turns, whether there was a good harvest etc etc needs to be recorded with color codes in the logs. Is there any way I can traverse the sqlite databases? I would like to be able the view the entries and tables etc. Different zoom levels should label the map locations such as duchy, county, fiefs, cities, ports, rivers etc. Also I added a sprite2D layer, I would like it to fit the background correctly. we can deal with that later if its too complicated.
+Implement new game/load/delete existing game view. 
+Also add in the chronicle tab, Information about end turns, whether there was a good harvest etc etc needs to be recorded with color codes in the logs.
+Is there any way I can traverse the sqlite databases? I would like to be able the view the entries and tables etc.Also I added a sprite2D layer, I would like it to fit the background correctly. we can deal with that later if its too complicated.
 
 **Out of scope for Phase 1:**
 - Castles and siege engines
