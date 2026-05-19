@@ -5,21 +5,11 @@ extends Node2D
 @onready var label_layer: Node2D = $LabelLayer
 @onready var camera: Camera2D = $Camera2D
 @onready var ui: CanvasLayer = $UI
+@onready var settings_panel: Panel = $UI/Control/SettingsPanel
 
-# Zoom thresholds for the label LOD system. Four tiers — at any one time at
-# most ONE tier is visible (mutually exclusive).
-#
-# Bands widened so each label tier has plenty of headroom before swapping:
-# the default fit-to-bounds zoom is ~0.135 and lands in DUCHY; you can wheel
-# in roughly 4× before COUNTY appears, and another 6× before FIEF.
-#
-#   z < ZOOM_COUNTRY_MAX      → COUNTRY (England / Scotland / Wales)
-#   ZOOM_COUNTRY_MAX..ZOOM_DUCHY_MAX → DUCHY
-#   ZOOM_DUCHY_MAX..ZOOM_COUNTY_MAX  → COUNTY
-#   z >= ZOOM_COUNTY_MAX      → (future) FIEF / city / castle
-const ZOOM_COUNTRY_MAX := 0.07
-const ZOOM_DUCHY_MAX   := 0.55
-const ZOOM_COUNTY_MAX  := 3.5
+# Zoom thresholds for the label LOD system come from the MapSettings
+# autoload — adjustable at runtime via the Settings panel and persisted to
+# user://map_settings.cfg. See MapSettings.gd for defaults.
 
 # Tint applied to all Polygon2D nodes that share the currently-selected county
 # name. Multiplied with their base colour, so values >1 brighten.
@@ -66,6 +56,9 @@ const BORDER_RESCALE_REL := 0.02   # 2% zoom delta triggers a rescale
 
 func _ready():
 	print("=== _ready() START ===")
+	# Listen for slider-driven settings changes so labels + borders re-snap
+	# to the new thresholds without needing a manual refresh.
+	MapSettings.changed.connect(_on_map_settings_changed)
 	if MapData.is_loaded:
 		build_map()
 	else:
@@ -131,15 +124,17 @@ func _update_border_widths() -> void:
 # Bands:
 #   0 = country, 1 = duchy, 2 = county, 3 = fief
 #
+# Thresholds come from MapSettings so the Settings panel can move them live.
+#
 # Returns: void
 func _update_label_visibility() -> void:
 	var z := camera.zoom.x
 	var band: int
-	if z < ZOOM_COUNTRY_MAX:
+	if z < MapSettings.country_zoom_max:
 		band = 0
-	elif z < ZOOM_DUCHY_MAX:
+	elif z < MapSettings.duchy_zoom_max:
 		band = 1
-	elif z < ZOOM_COUNTY_MAX:
+	elif z < MapSettings.county_zoom_max:
 		band = 2
 	else:
 		band = 3
@@ -156,6 +151,15 @@ func _update_label_visibility() -> void:
 			"country": child.visible = want_country
 			"duchy":   child.visible = want_duchy
 			"county":  child.visible = want_county
+
+
+# Called when MapSettings emits `changed`. Force-refresh visibility and
+# border widths without waiting for a zoom delta to trigger them.
+func _on_map_settings_changed() -> void:
+	_last_zoom_band = -1
+	_last_border_zoom = -1.0
+	_update_label_visibility()
+	_update_border_widths()
 
 
 # Frame the camera on the full polygon bounding box, leaving room on the
@@ -246,6 +250,9 @@ func _unhandled_input(event: InputEvent) -> void:
 				_clear_selection()
 			KEY_F:
 				fit_to_bounds()
+			KEY_O:
+				if settings_panel:
+					settings_panel.visible = not settings_panel.visible
 
 
 # Engine-invoked per frame. Reads keyboard pan input (WASD or arrows) and

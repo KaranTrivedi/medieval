@@ -188,52 +188,57 @@ func build_county_polygons(parent: Node2D, world_scale: Vector2 = Vector2(4, 4))
 		c.a = FILL_ALPHA
 		duchy_colors[did] = c
 
-	var count := 0
+	# For each county, fill EVERY ring. Each ring is decomposed into convex
+	# pieces (Geometry2D.decompose_polygon_in_convex) before being handed to
+	# Polygon2D. Why: Godot's auto-triangulator silently fails on some
+	# concave / coastal shapes (Orkney's mainland was the recurring offender);
+	# convex pieces always render. The county-level metadata is attached to
+	# the FIRST piece so click-hit-testing still works the same way.
+	var county_count := 0
+	var piece_count := 0
 	for cn in counties:
 		var co = counties[cn]
 		var polys = get_polygons(cn, world_scale)
 		if polys.is_empty():
 			continue
-
-		var largest_ring = polys[0]
-		var largest_size = 0
-		for ring in polys:
-			if ring.size() > largest_size:
-				largest_size = ring.size()
-				largest_ring = ring
-
-		var poly2d = Polygon2D.new()
-		poly2d.name = cn.replace(" ", "_")
-		poly2d.polygon = largest_ring
-		poly2d.color = duchy_colors.get(co.get("duchy", ""), Color(0.2, 0.2, 0.2, FILL_ALPHA))
-
-		poly2d.set_meta("county_name", cn)
-		poly2d.set_meta("duchy", co.get("duchy", ""))
-		poly2d.set_meta("earl", co.get("earl", ""))
-		poly2d.set_meta("income", co.get("income", 0))
-		poly2d.set_meta("garrison", co.get("garrison", 0))
-		poly2d.set_meta("population", co.get("population", 0))
-
-		parent.add_child(poly2d)
-
-		for i in range(polys.size()):
-			if polys[i] == largest_ring:
+		var fill_color: Color = duchy_colors.get(co.get("duchy", ""), Color(0.2, 0.2, 0.2, FILL_ALPHA))
+		var first_piece_for_county := true
+		for ring_idx in range(polys.size()):
+			var ring: PackedVector2Array = polys[ring_idx]
+			if ring.size() < 3:
 				continue
-			# Was: skip rings < 5 pts. Lowered to 3 (= valid triangle) so
-			# small islands aren't dropped entirely. The dedup in get_polygons
-			# already removes degenerate cases.
-			if polys[i].size() < 3:
-				continue
-			var extra = Polygon2D.new()
-			extra.name = cn.replace(" ", "_") + "_part" + str(i)
-			extra.polygon = polys[i]
-			extra.color = poly2d.color
-			extra.set_meta("county_name", cn)
-			parent.add_child(extra)
+			# Skip near-zero-area triangle rings — they're sub-pixel slivers
+			# that just add node count without being visible.
+			if ring.size() == 3:
+				var a := ring[0]; var b := ring[1]; var c := ring[2]
+				if abs((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)) < 1.0:
+					continue
+			var convex_pieces: Array = Geometry2D.decompose_polygon_in_convex(ring)
+			if convex_pieces.is_empty():
+				# Fall back to the raw ring; rarely happens but better to try.
+				convex_pieces = [ring]
+			for piece in convex_pieces:
+				if piece.size() < 3:
+					continue
+				var p2d := Polygon2D.new()
+				p2d.name = cn.replace(" ", "_") + "_p" + str(piece_count)
+				p2d.polygon = piece
+				p2d.color = fill_color
+				# Attach county metadata to EVERY piece so hit-testing works
+				# anywhere in the county, no matter which piece is clicked.
+				p2d.set_meta("county_name", cn)
+				if first_piece_for_county:
+					p2d.set_meta("duchy", co.get("duchy", ""))
+					p2d.set_meta("earl", co.get("earl", ""))
+					p2d.set_meta("income", co.get("income", 0))
+					p2d.set_meta("garrison", co.get("garrison", 0))
+					p2d.set_meta("population", co.get("population", 0))
+					first_piece_for_county = false
+				parent.add_child(p2d)
+				piece_count += 1
+		county_count += 1
 
-		count += 1
-
-	print("MapData: Built %d county Polygon2D nodes." % count)
+	print("MapData: Built %d county fills as %d convex pieces." % [county_count, piece_count])
 
 
 # Draw ONE outline per county. The bg_godot.json data file has already
@@ -250,47 +255,56 @@ func build_county_polygons(parent: Node2D, world_scale: Vector2 = Vector2(4, 4))
 #   world_scale (Vector2): same scale used in build_county_polygons.
 # Returns: void
 func build_county_borders(parent: Node2D, world_scale: Vector2 = Vector2(4, 4)) -> void:
+	# COUNTY borders: thin dark hairline around EVERY county.
+	# DUCHY borders:  thicker dark line tracing the ACTUAL duchy perimeter,
+	# read from the pre-computed `duchies[did].polygons` field (Python unions
+	# the county polygons there). This gives correct duchy outlines —
+	# internal same-duchy county edges are drawn ONLY by the thin pass.
 	const COUNTY_BORDER_COLOR := Color(0.10, 0.07, 0.03, 0.85)
-	const COUNTY_BORDER_PX    := 1.0     # county outline target = 1 px on screen
-	const DUCHY_BORDER_COLOR  := Color(0.00, 0.00, 0.00, 1.00)
-	const DUCHY_BORDER_PX     := 5.5     # duchy outline target = 5.5 px on screen (5.5× county)
+	const DUCHY_BORDER_COLOR  := Color(0.00, 0.00, 0.00, 1.00)   # black
+	# Target screen-pixel widths come from MapSettings (adjustable + saved).
+	var county_border_px: float = MapSettings.county_border_px
+	var duchy_border_px:  float = MapSettings.duchy_border_px
 
-	var thin_pass: Array = []
-	var thick_pass: Array = []
-
+	# Pass 1: thin county outlines
+	var county_count := 0
 	for cn in counties:
-		var co: Dictionary = counties[cn]
-		var my_duchy: String = co.get("duchy", "")
-		var on_duchy_edge := false
-		for nb_cn in get_adjacent(cn):
-			if str(counties.get(nb_cn, {}).get("duchy", "")) != my_duchy:
-				on_duchy_edge = true
-				break
-		var target_pass: Array = thick_pass if on_duchy_edge else thin_pass
 		for ring in get_polygons(cn, world_scale):
-			if ring.size() >= 4:
-				target_pass.append(ring)
+			if ring.size() < 4:
+				continue
+			var line := Line2D.new()
+			line.points = ring
+			line.closed = true
+			line.default_color = COUNTY_BORDER_COLOR
+			line.joint_mode = Line2D.LINE_JOINT_BEVEL
+			line.antialiased = false
+			line.set_meta("screen_px", county_border_px)
+			parent.add_child(line)
+			county_count += 1
 
-	# Thin lines first so thick duchy lines render on top of them.
-	for ring in thin_pass:
-		var line := Line2D.new()
-		line.points = ring
-		line.closed = true
-		line.default_color = COUNTY_BORDER_COLOR
-		line.joint_mode = Line2D.LINE_JOINT_ROUND
-		line.set_meta("screen_px", COUNTY_BORDER_PX)
-		parent.add_child(line)
-	# Thick duchy lines on top of the thin ones.
-	for ring in thick_pass:
-		var line := Line2D.new()
-		line.points = ring
-		line.closed = true
-		line.default_color = DUCHY_BORDER_COLOR
-		line.joint_mode = Line2D.LINE_JOINT_ROUND
-		line.set_meta("screen_px", DUCHY_BORDER_PX)
-		parent.add_child(line)
+	# Pass 2: thick duchy outlines, from the unioned duchy polygons.
+	var duchy_count := 0
+	for did in duchies:
+		var d_polys: Array = duchies[did].get("polygons", [])
+		for ring_raw in d_polys:
+			if ring_raw.size() < 4:
+				continue
+			var ring := PackedVector2Array()
+			for pt in ring_raw:
+				ring.append(Vector2(pt[0], pt[1]) * world_scale)
+			if ring.size() < 4:
+				continue
+			var line := Line2D.new()
+			line.points = ring
+			line.closed = true
+			line.default_color = DUCHY_BORDER_COLOR
+			line.joint_mode = Line2D.LINE_JOINT_BEVEL
+			line.antialiased = false
+			line.set_meta("screen_px", duchy_border_px)
+			parent.add_child(line)
+			duchy_count += 1
 
-	print("MapData: Built %d thin + %d thick border outlines." % [thin_pass.size(), thick_pass.size()])
+	print("MapData: Built %d county outlines + %d duchy outlines." % [county_count, duchy_count])
 
 
 # Maps a duchy id to the political/geographic country its land sits in.
@@ -333,12 +347,15 @@ func build_labels(parent: Node2D, world_scale: Vector2 = Vector2(4, 4)) -> void:
 				biggest = r
 		county_largest_ring[cn] = biggest
 
-	# COUNTY LABELS — rotated to follow the long axis of the county's main ring.
-	# EB Garamond serif at this tier, bumped to 52 so it stays readable when
-	# zoomed in only a little past the county-band threshold.
+	# COUNTY LABELS — drawn as a curved per-character string that follows
+	# the polygon's principal axis. Font size scales down so the label
+	# always fits inside the polygon's axis extent.
 	for cn in counties:
-		var ang := _compute_label_rotation(county_largest_ring[cn])
-		parent.add_child(_make_label(cn, county_centres[cn], 52, "county", ang))
+		var ring: PackedVector2Array = county_largest_ring[cn]
+		var ang := _compute_label_rotation(ring)
+		var max_axis: float = _axis_extent(ring, ang)
+		var size_for_fit: int = _fit_font_size(cn, max_axis, 52, 18)
+		parent.add_child(_make_curved_label(cn, ring, county_centres[cn], size_for_fit, "county", ang, max_axis))
 
 	# DUCHY LABELS — centroid is the unweighted mean of member-county centres.
 	# Rotation comes from PCA on those centres (so a long thin duchy gets
@@ -427,41 +444,71 @@ func _compute_label_rotation(points: PackedVector2Array) -> float:
 	return clampf(angle, -PI * 0.25, PI * 0.25)
 
 
+# Return the polygon's extent along the axis given by `angle`. Equivalent to
+# (max projection − min projection) of the points onto the unit vector
+# (cos angle, sin angle).
+#
+# Args:
+#   points (PackedVector2Array): polygon vertices.
+#   angle (float): axis angle in radians.
+# Returns:
+#   float: extent in world units. 0 if fewer than 2 points.
+func _axis_extent(points: PackedVector2Array, angle: float) -> float:
+	if points.size() < 2:
+		return 0.0
+	var dir := Vector2(cos(angle), sin(angle))
+	var lo: float = INF
+	var hi: float = -INF
+	for p in points:
+		var t: float = p.dot(dir)
+		if t < lo: lo = t
+		if t > hi: hi = t
+	return hi - lo
+
+
+# Pick a font size such that the rendered label fits within `max_axis` world
+# units along the principal axis. Margin is built in so the text doesn't
+# kiss the polygon edges.
+#
+# Args:
+#   text (String): the label string.
+#   max_axis (float): polygon extent along the label's rotation axis.
+#   nominal (int): preferred (max) font size if the polygon is large enough.
+#   minimum (int): floor — never go below this even if the polygon is tiny.
+# Returns:
+#   int: chosen font size in points.
+func _fit_font_size(text: String, max_axis: float, nominal: int, minimum: int) -> int:
+	if text.length() == 0 or max_axis <= 0.0:
+		return nominal
+	# Same factor used in _make_label (Garamond glyph half-width per pt).
+	const W_FACTOR := 0.27
+	const SAFETY := 0.80    # only use 80% of the polygon's axis extent
+	var allowed_width: float = max_axis * SAFETY
+	var fit: int = int(allowed_width / (W_FACTOR * float(text.length()) * 2.0))
+	return clampi(fit, minimum, nominal)
+
+
 # Helper: build one styled Label centred on world_pos, tagged with its zoom band.
-# Picks the font per tier:
-#   country / duchy → UnifrakturMaguntia (heavy blackletter, big headers)
-#   county          → EB Garamond SemiBold (serif, much more readable at smaller sizes)
+# All tiers now use EB Garamond SemiBold (the heavy blackletter was killing
+# legibility at small sizes per user feedback).
 #
 # Rotation is applied via pivot_offset so text rotates about its centre.
-# Centring is approximate (no Label.size until in tree) but tuned for the
-# font's glyph-width characteristics.
 func _make_label(text: String, world_pos: Vector2, font_size: int, band: String, rotation: float = 0.0) -> Label:
 	var lbl := Label.new()
 	lbl.text = text
 
-	# Pick font + per-font centring factor. Blackletter glyphs are wider than
-	# serif at the same point size, so the half-width estimate differs.
-	var use_blackletter: bool = (band == "country" or band == "duchy")
-	var font: Font = _font_blackletter if use_blackletter else _font_serif
-	var glyph_w_factor: float = 0.34 if use_blackletter else 0.27
-	if font == null:
-		# Lazy-load the chosen font on first request.
-		if use_blackletter:
-			_font_blackletter = load(FONT_PATH_BLACKLETTER)
-			font = _font_blackletter
-		else:
-			_font_serif = load(FONT_PATH_SERIF)
-			font = _font_serif
-	if font != null:
-		lbl.add_theme_font_override("font", font)
+	if _font_serif == null:
+		_font_serif = load(FONT_PATH_SERIF)
+	if _font_serif != null:
+		lbl.add_theme_font_override("font", _font_serif)
 
 	lbl.add_theme_font_size_override("font_size", font_size)
 	lbl.add_theme_color_override("font_color", Color(0.96, 0.93, 0.80))
 	lbl.add_theme_color_override("font_outline_color", Color(0.04, 0.02, 0.00, 1.0))
-	# Outline thickness scales with font size so big labels keep their stroke.
-	lbl.add_theme_constant_override("outline_size", maxi(4, int(font_size * 0.10)))
+	lbl.add_theme_constant_override("outline_size", maxi(3, int(font_size * 0.09)))
 
-	var est_half_w: float = font_size * glyph_w_factor * float(text.length())
+	# Garamond glyph-width factor (much narrower than blackletter).
+	var est_half_w: float = font_size * 0.27 * float(text.length())
 	var est_half_h: float = font_size * 0.55
 	lbl.position = world_pos - Vector2(est_half_w, est_half_h)
 	lbl.pivot_offset = Vector2(est_half_w, est_half_h)
@@ -470,8 +517,145 @@ func _make_label(text: String, world_pos: Vector2, font_size: int, band: String,
 	return lbl
 
 
-# Font paths + cached resources. Loaded on first label of each kind.
-const FONT_PATH_BLACKLETTER := "res://assets/fonts/EB_Garamond,UnifrakturMaguntia/UnifrakturMaguntia/UnifrakturMaguntia-Regular.ttf"
-const FONT_PATH_SERIF       := "res://assets/fonts/EB_Garamond,UnifrakturMaguntia/EB_Garamond/static/EBGaramond-SemiBold.ttf"
-var _font_blackletter: Font = null
+# EB Garamond SemiBold for every tier.
+const FONT_PATH_SERIF := "res://assets/fonts/EB_Garamond,UnifrakturMaguntia/EB_Garamond/static/EBGaramond-SemiBold.ttf"
 var _font_serif: Font = null
+
+
+# Build a curved label: each character is a separate Label placed along a
+# quadratic bezier whose endpoints sit at the polygon's principal-axis
+# extents and whose middle control point is offset perpendicular by the
+# centerline-bend of the polygon. The returned Node2D is tagged with the
+# zoom band so CampaignMap's LOD switch still finds it.
+#
+# Args:
+#   text (String): the label text (e.g. "Yorkshire").
+#   ring (PackedVector2Array): polygon's largest ring (world coords).
+#   centre (Vector2): polygon centroid in world coords.
+#   font_size (int): pre-fitted point size for this label.
+#   band (String): "county" / "duchy" / "country" — drives visibility.
+#   axis_angle (float): radians, principal-axis direction.
+#   axis_length (float): polygon extent along axis in world units.
+# Returns:
+#   Node2D: container holding one Label per character.
+func _make_curved_label(text: String, ring: PackedVector2Array, centre: Vector2,
+		font_size: int, band: String, axis_angle: float, axis_length: float) -> Node2D:
+	var container := Node2D.new()
+	container.set_meta("zoom_band", band)
+	if text.length() == 0 or axis_length <= 0.0:
+		return container
+
+	# Build bezier control points.
+	var dir := Vector2(cos(axis_angle), sin(axis_angle))
+	var perp := Vector2(-dir.y, dir.x)
+	# Use 70% of the axis for text so the label doesn't hug the polygon edge.
+	var half_len: float = axis_length * 0.35
+	var p0: Vector2 = centre - dir * half_len
+	var p2: Vector2 = centre + dir * half_len
+	# Centerline bend at axis midpoint, capped so the curve never gets goofy.
+	var bend: float = _centerline_bend(ring, centre, dir, perp)
+	bend = clampf(bend, -axis_length * 0.20, axis_length * 0.20)
+	# Quadratic bezier passes through (P0 + 2P1 + P2)/4 at t=0.5; with
+	# (P0 + P2)/2 = centre, requiring the midpoint of the curve to land at
+	# centre + perp*bend gives P1 = centre + perp*(2*bend).
+	var p1: Vector2 = centre + perp * (bend * 2.0)
+
+	# Ensure the font resource is loaded once.
+	if _font_serif == null:
+		_font_serif = load(FONT_PATH_SERIF)
+
+	# Approximate per-character pen advance, used for spacing along the curve.
+	# For Garamond SemiBold this is roughly 0.50 of the font size for caps,
+	# 0.42 for mixed case. We use 0.46 as a workable average.
+	var char_pen: float = font_size * 0.46
+	# Approximate the bezier's arc length by sampling — proper integration
+	# would be overkill for label placement.
+	var arc_len: float = _bezier_approx_length(p0, p1, p2, 16)
+	# How much of the curve do we actually want to use? Just enough for the
+	# text width, centred on t=0.5.
+	var text_width: float = char_pen * float(text.length() - 1)
+	var coverage: float = clampf(text_width / max(arc_len, 1.0), 0.05, 1.0)
+	var t_start: float = 0.5 - coverage * 0.5
+	var t_step: float = (coverage) / max(1.0, float(text.length() - 1))
+
+	var half_w_char: float = font_size * 0.27
+	var half_h_char: float = font_size * 0.55
+
+	for i in range(text.length()):
+		var ch: String = text.substr(i, 1)
+		if ch == " ":
+			continue
+		var t: float = t_start + t_step * float(i) if text.length() > 1 else 0.5
+		var pos: Vector2 = _bez(p0, p1, p2, t)
+		var tan: Vector2 = _bez_tangent(p0, p1, p2, t)
+		var angle: float = atan2(tan.y, tan.x)
+		# Wrap to readable range so chars never appear upside-down.
+		while angle >  PI * 0.5: angle -= PI
+		while angle < -PI * 0.5: angle += PI
+
+		var lbl := Label.new()
+		lbl.text = ch
+		lbl.add_theme_font_override("font", _font_serif)
+		lbl.add_theme_font_size_override("font_size", font_size)
+		lbl.add_theme_color_override("font_color", Color(0.96, 0.93, 0.80))
+		lbl.add_theme_color_override("font_outline_color", Color(0.04, 0.02, 0.00, 1.0))
+		lbl.add_theme_constant_override("outline_size", maxi(3, int(font_size * 0.09)))
+		lbl.position = pos - Vector2(half_w_char, half_h_char)
+		lbl.pivot_offset = Vector2(half_w_char, half_h_char)
+		lbl.rotation = angle
+		container.add_child(lbl)
+	return container
+
+
+# Quadratic bezier evaluation: (1-t)²·P0 + 2(1-t)t·P1 + t²·P2.
+func _bez(p0: Vector2, p1: Vector2, p2: Vector2, t: float) -> Vector2:
+	var omt: float = 1.0 - t
+	return omt * omt * p0 + 2.0 * omt * t * p1 + t * t * p2
+
+
+# Derivative of the bezier wrt t — gives the tangent vector at parameter t.
+func _bez_tangent(p0: Vector2, p1: Vector2, p2: Vector2, t: float) -> Vector2:
+	return 2.0 * ((1.0 - t) * (p1 - p0) + t * (p2 - p1))
+
+
+# Approximate arc length by polyline sampling. `samples` chord count.
+func _bezier_approx_length(p0: Vector2, p1: Vector2, p2: Vector2, samples: int) -> float:
+	var total: float = 0.0
+	var prev: Vector2 = p0
+	for i in range(1, samples + 1):
+		var t: float = float(i) / float(samples)
+		var pt: Vector2 = _bez(p0, p1, p2, t)
+		total += prev.distance_to(pt)
+		prev = pt
+	return total
+
+
+# Returns the polygon's centerline perpendicular offset at the MIDPOINT of
+# its principal axis. Vertices in the middle ±15% axis band are sampled,
+# and the midpoint between their min and max perpendicular coordinates is
+# returned. Symmetric polygons → 0. Banana-shaped ones → non-zero bend.
+func _centerline_bend(ring: PackedVector2Array, centre: Vector2, dir: Vector2, perp: Vector2) -> float:
+	if ring.size() < 5:
+		return 0.0
+	var min_u: float = INF
+	var max_u: float = -INF
+	for p in ring:
+		var u: float = (p - centre).dot(dir)
+		if u < min_u: min_u = u
+		if u > max_u: max_u = u
+	var axis_len: float = max_u - min_u
+	if axis_len < 4.0:
+		return 0.0
+	var bin_lo: float = min_u + axis_len * 0.35
+	var bin_hi: float = min_u + axis_len * 0.65
+	var v_lo: float = INF
+	var v_hi: float = -INF
+	for p in ring:
+		var u: float = (p - centre).dot(dir)
+		if u >= bin_lo and u <= bin_hi:
+			var v: float = (p - centre).dot(perp)
+			if v < v_lo: v_lo = v
+			if v > v_hi: v_hi = v
+	if v_lo == INF:
+		return 0.0
+	return (v_lo + v_hi) * 0.5

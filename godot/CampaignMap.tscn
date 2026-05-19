@@ -4,6 +4,7 @@
 [ext_resource type="Script" uid="uid://caj7f0xue2hei" path="res://ui_panel.gd" id="2_uipanel"]
 [ext_resource type="Script" uid="uid://so2rxas51hka" path="res://top_bar.gd" id="3_topbar"]
 [ext_resource type="Texture2D" uid="uid://xesnbi1kn3rg" path="res://assets/page_seamless_01.png" id="4_brjqc"]
+[ext_resource type="Script" uid="uid://b65mvqcdibu11" path="res://settings_panel.gd" id="5_settings"]
 
 [sub_resource type="LabelSettings" id="LabelSettings_4"]
 
@@ -56,6 +57,8 @@ layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
 mouse_filter = 2
 
 [node name="TopBar" type="Panel" parent="UI/Control" unique_id=528008623]
@@ -206,3 +209,12 @@ size_flags_vertical = 3
 [node name="SaveButton" type="Button" parent="UI/Control/InfoPanel/VBoxContainer" unique_id=1575338710]
 layout_mode = 2
 text = "Save Game"
+
+[node name="SettingsPanel" type="Panel" parent="UI/Control" unique_id=2128913537]
+visible = false
+layout_mode = 0
+offset_left = 14.0
+offset_top = 54.0
+offset_right = 360.0
+offset_bottom = 510.0
+script = ExtResource("5_settings")

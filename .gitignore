@@ -1,4 +1,6 @@
 *.exe
 *.json
 
+!bg_godot.json
+
 comfy_workflows/*

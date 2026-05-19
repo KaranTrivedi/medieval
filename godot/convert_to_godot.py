@@ -429,6 +429,44 @@ for cn, raw_rings in county_polys_raw.items():
         merged = make_valid(merged)
     county_polys[cn] = _shapely_to_rings(merged)
 
+
+# ── DUCHY POLYGONS (union of constituent counties) ────────────────────────────
+# This is what the renderer actually wants for the THICK duchy boundary lines.
+# Without it, the previous code was forced to approximate duchy outlines as
+# "the entire outline of any county that touches another duchy", which drew
+# the thick treatment on a county's internal same-duchy edges too. By unioning
+# the LAD-level polygons per duchy we get the TRUE perimeter, drawn exactly
+# along duchy-to-duchy and duchy-to-sea boundaries.
+duchy_polys = {}  # duchy_id → list of merged outer rings
+for did in DUCHY_DATA.keys():
+    member_counties = [cn for cn, code_list_unused in []]  # placeholder, populated below
+# Build duchy → counties map by reverse-lookup through LAD_TO_DUCHY.
+_duchy_to_counties = defaultdict(list)
+for code, dchy in LAD_TO_DUCHY.items():
+    cn = LAD_TO_COUNTY.get(code)
+    if cn and cn not in _duchy_to_counties[dchy]:
+        _duchy_to_counties[dchy].append(cn)
+
+for did, dd in DUCHY_DATA.items():
+    duchy_sh_polys = []
+    for cn in _duchy_to_counties.get(did, []):
+        for ring in county_polys.get(cn, []):
+            try:
+                p = ShPoly(ring)
+                if not p.is_valid:
+                    p = p.buffer(0)
+                if p.is_valid and not p.is_empty and p.area > 0:
+                    duchy_sh_polys.append(p)
+            except Exception:
+                continue
+    if not duchy_sh_polys:
+        duchy_polys[did] = []
+        continue
+    merged_duchy = unary_union(duchy_sh_polys).buffer(0)
+    if not merged_duchy.is_valid:
+        merged_duchy = make_valid(merged_duchy)
+    duchy_polys[did] = _shapely_to_rings(merged_duchy)
+
 # ── COMPUTE CENTROIDS ──────────────────────────────────────────────────────────
 def centroid(polygons):
     """Compute centroid from all polygon points."""
@@ -506,6 +544,11 @@ for dk, dd in DUCHY_DATA.items():
         "color": dd["color"],
         "lord": dd["lord"],
         "counties": sorted(dk_counties),
+        # Pre-computed union of all constituent county polygons. The renderer
+        # uses this for the THICK duchy-boundary lines and for placing the
+        # curved duchy label, instead of approximating from per-county data.
+        "polygons": duchy_polys.get(dk, []),
+        "center": centroid(duchy_polys.get(dk, [])),
     }
 
 for cn, polys in county_polys.items():
