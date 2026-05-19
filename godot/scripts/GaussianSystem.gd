@@ -41,15 +41,8 @@ func sample(mean: float, std_dev: float) -> float:
 func sample_clamped(mean: float, std_dev: float, min_v: float, max_v: float) -> float:
 	return clampf(sample(mean, std_dev), min_v, max_v)
 
-
-# Per-county harvest multiplier per Project.md §10:
-#   Mean    = 3× seed planted        → normalised to 1.0
-#   StdDev  = 1.2× seed              → normalised to 0.4
-#   Min     = 0.5× seed (famine)     → normalised to 0.167
-#   Max     = 6× seed (bumper crop)  → normalised to 2.0
-# Multiply this against a county's base income to get the year's actual income.
-#
-# Returns:
-#   float: Harvest multiplier in [0.167, 2.0]. Mean ~1.0, σ ~0.4.
-func harvest_roll() -> float:
-	return sample_clamped(1.0, 0.4, 0.167, 2.0)
+# Harvest rolls used to live here as `harvest_roll()` with hard-coded constants.
+# They were moved to GameState (and the harvest_params table) in schema v2 so
+# climate events can shift them and so different seasons can roll differently.
+# Call GameState.get_harvest_params(season) + GaussianSystem.sample_clamped(...)
+# instead.

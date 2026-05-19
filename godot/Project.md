@@ -383,6 +383,8 @@ Both present in the data but initially governed by non-English rulers. Available
 
 Peasants are **not individual characters**. They are population numbers per region. Their aggregate behaviour drives economic emergence.
 
+Need to add a burghers subset to the peasant population. As cities develop, they can create an upper class of peasants. this type of population will produce its own unit types, and allow for creating more advanced resources in cities. Over production of burghers will cause issues with pop order dissatisfaction, reduction of percentage of peasants reduces raw inputs to the city. This can play into the gaussian system. Maintain balance of peasant types.
+
 ```
 Population threshold → Merchants spawn
 Merchants threshold  → Guild spawns
@@ -732,6 +734,8 @@ medieval/
 └── ue5/                            ← Phase 3 battle engine (future)
     └── MedievalBattle/
 ```
+
+https://toppng.com/free-image/wikimedia-commons-english-coat-of-arms-medieval-banner-heraldry-medieval-PNG-free-PNG-Images_208751
 
 ---
 
