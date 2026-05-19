@@ -1,78 +1,152 @@
 # ui_panel.gd
-# Right-side InfoPanel for the campaign map. Receives county data via
-# update_panel() from CampaignMap, and owns the Save button which writes the
-# working DB to a timestamped slot via the GameState autoload.
+# Right-side InfoPanel. Hidden by default. Rebuilds its contents from scratch
+# every time CampaignMap calls update_panel_typed() — that way each region
+# tier (country/duchy/county/barony) gets its own bespoke layout instead of
+# the previous repurposed-rows hack.
 
 extends CanvasLayer
 
-@onready var county_name_label: Label  = $Control/InfoPanel/VBoxContainer/CountyName
-@onready var duchy_label: Label        = $Control/InfoPanel/VBoxContainer/DuchySection/DuchyValue
-@onready var earl_label: Label         = $Control/InfoPanel/VBoxContainer/GovernanceSection/EarlHBox/EarlValue
-@onready var income_label: Label       = $Control/InfoPanel/VBoxContainer/GovernanceSection/IncomeHBox/IncomeValue
-@onready var garrison_label: Label     = $Control/InfoPanel/VBoxContainer/GovernanceSection/GarrisonHBox/GarrisonValue
-@onready var population_label: Label   = $Control/InfoPanel/VBoxContainer/GovernanceSection/PopulationHBox/PopulationValue
-@onready var save_button: Button       = $Control/InfoPanel/VBoxContainer/SaveButton
+@onready var info_panel: Panel       = $Control/InfoPanel
+@onready var vbox: VBoxContainer     = $Control/InfoPanel/VBoxContainer
+
+# Big colour values for headers per region tier — gives each tier a distinct
+# visual identity in the panel header.
+const HEADER_COLORS := {
+	"country": Color(0.96, 0.78, 0.30),    # gold
+	"duchy":   Color(0.92, 0.65, 0.40),    # bronze
+	"county":  Color(0.88, 0.78, 0.55),    # parchment
+	"barony":  Color(0.75, 0.70, 0.55),    # muted earth
+}
 
 
-# Engine-invoked. Wires up the Save button and resets fields to placeholders.
 func _ready() -> void:
-	print("UI Panel initialized")
-	save_button.pressed.connect(_on_save_pressed)
-	clear_panel()
+	info_panel.visible = false
 	visible = true
 
 
-# Reset all data labels back to em-dash placeholders.
-#
-# Returns: void
+# Hide the panel and drop any built-up content.
 func clear_panel() -> void:
-	county_name_label.text = "-"
-	duchy_label.text = "—"
-	earl_label.text = "—"
-	income_label.text = "— £/yr"
-	garrison_label.text = "—"
-	population_label.text = "—"
+	info_panel.visible = false
+	_clear_children()
 
 
-# Populate the panel for one county.
+# Show the panel and build a tier-specific layout from `data`.
 #
-# Args:
-#   county_data (Dictionary): Row from MapData.get_county(name). Keys read here:
-#       "duchy" (String), "earl" (String), "income" (int), "garrison" (int),
-#       "population" (int). Missing keys default to "—" or 0.
-#   county_name (String): Display name for the title row. Underscores are
-#       converted to spaces for readability.
-# Returns: void
-func update_panel(county_data: Dictionary, county_name: String) -> void:
-	print("Updating panel for: " + county_name)
-	county_name_label.text = county_name.replace("county", "-")
-	duchy_label.text = county_data.get("duchy", "—").capitalize()
-	earl_label.text = county_data.get("earl", "—")
-
-	var income: int = int(county_data.get("income", 0))
-	income_label.text = "%d £/yr" % income
-
-	var garrison: int = int(county_data.get("garrison", 0))
-	garrison_label.text = "%d troops" % garrison
-
-	var population: int = int(county_data.get("population", 0))
-	population_label.text = "%d people" % population
+# Required keys: "type" (one of country/duchy/county/barony) and "name".
+# Extra keys are read per tier — see the individual _build_* functions.
+func update_panel_typed(data: Dictionary) -> void:
+	info_panel.visible = true
+	_clear_children()
+	match str(data.get("type", "")):
+		"country": _build_country(data)
+		"duchy":   _build_duchy(data)
+		"county":  _build_county(data)
+		"barony":  _build_barony(data)
 
 
-# Save button handler. Writes a timestamped copy of the working DB into
-# user://saves/. The working DB itself is always up-to-date — this is purely
-# a manual checkpoint the player can return to.
-#
-# Returns: void
-func _on_save_pressed() -> void:
-	# Replace ':' so the timestamp is a valid Windows filename.
-	var ts: String = Time.get_datetime_string_from_system().replace(":", "-")
-	var path: String = "user://saves/save_%s.db" % ts
-	var ok: bool = GameState.save_to(path)
-	if ok:
-		print("UI: saved to ", path)
-		save_button.text = "Saved!"
-		await get_tree().create_timer(1.2).timeout
-		save_button.text = "Save Game"
-	else:
-		push_error("UI: save failed")
+# ── PER-TIER BUILDERS ─────────────────────────────────────────────────────────
+
+func _build_country(d: Dictionary) -> void:
+	_add_header(d.get("name", ""), "country", "Country")
+	_add_kv("Duchies",       str(int(d.get("duchy_count", 0))))
+	_add_kv("Counties",      str(int(d.get("county_count", 0))))
+	_add_kv("Baronies",      str(int(d.get("barony_count", 0))))
+	_add_kv("Total income",  "%s £/yr" % _fmt_thousands(int(d.get("total_income", 0))))
+	_add_kv("Population",    _fmt_thousands(int(d.get("population", 0))))
+	_add_kv("Garrison",      "%s troops" % _fmt_thousands(int(d.get("garrison", 0))))
+
+
+func _build_duchy(d: Dictionary) -> void:
+	_add_header(d.get("name", ""), "duchy", "Duchy")
+	_add_kv("Lord",          str(d.get("lord", "—")))
+	_add_kv("Counties",      str(int(d.get("county_count", 0))))
+	_add_kv("Baronies",      str(int(d.get("barony_count", 0))))
+	_add_kv("Total income",  "%s £/yr" % _fmt_thousands(int(d.get("total_income", 0))))
+	_add_kv("Population",    _fmt_thousands(int(d.get("population", 0))))
+	_add_kv("Garrison",      "%s troops" % _fmt_thousands(int(d.get("garrison", 0))))
+
+
+func _build_county(d: Dictionary) -> void:
+	_add_header(d.get("name", ""), "county", "County")
+	_add_kv("Duchy",         str(d.get("duchy", "—")).capitalize())
+	_add_kv("Earl",          str(d.get("earl", "—")))
+	_add_kv("Baronies",      str(int(d.get("baronies", []).size())))
+	_add_kv("Income",        "%s £/yr" % _fmt_thousands(int(d.get("income", 0))))
+	_add_kv("Population",    _fmt_thousands(int(d.get("population", 0))))
+	_add_kv("Garrison",      "%s troops" % _fmt_thousands(int(d.get("garrison", 0))))
+
+
+func _build_barony(d: Dictionary) -> void:
+	_add_header(d.get("name", ""), "barony", "Barony")
+	_add_kv("County",        str(d.get("county", "—")))
+	_add_kv("Income",        "%s £/yr" % _fmt_thousands(int(d.get("income", 0))))
+	_add_kv("Population",    _fmt_thousands(int(d.get("population", 0))))
+	_add_kv("Garrison",      "%s troops" % _fmt_thousands(int(d.get("garrison", 0))))
+
+
+# ── HELPERS ───────────────────────────────────────────────────────────────────
+
+func _clear_children() -> void:
+	for child in vbox.get_children():
+		child.queue_free()
+
+
+# Add a styled header row. `caption` is the small all-caps tier label,
+# `name` is the region name.
+func _add_header(name: String, tier_key: String, caption: String) -> void:
+	var cap := Label.new()
+	cap.text = caption.to_upper()
+	cap.add_theme_font_size_override("font_size", 11)
+	cap.add_theme_color_override("font_color", Color(0.85, 0.80, 0.65))
+	vbox.add_child(cap)
+
+	var name_lbl := Label.new()
+	name_lbl.text = str(name)
+	name_lbl.add_theme_font_size_override("font_size", 22)
+	name_lbl.add_theme_color_override("font_color", HEADER_COLORS.get(tier_key, Color.WHITE))
+	name_lbl.add_theme_constant_override("outline_size", 1)
+	name_lbl.add_theme_color_override("font_outline_color", Color(0.05, 0.04, 0.01))
+	vbox.add_child(name_lbl)
+
+	var sep := HSeparator.new()
+	vbox.add_child(sep)
+
+
+# Add a key/value row. Caption on the left, value right-aligned.
+func _add_kv(key: String, value: String) -> void:
+	var row := HBoxContainer.new()
+	row.theme_type_variation = ""
+	row.add_theme_constant_override("separation", 12)
+	vbox.add_child(row)
+
+	var k := Label.new()
+	k.text = key
+	k.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	k.add_theme_font_size_override("font_size", 12)
+	k.add_theme_color_override("font_color", Color(0.65, 0.60, 0.50))
+	row.add_child(k)
+
+	var v := Label.new()
+	v.text = value
+	v.add_theme_font_size_override("font_size", 13)
+	v.add_theme_color_override("font_color", Color(0.95, 0.92, 0.80))
+	row.add_child(v)
+
+
+# Format an integer with comma thousands separators ("12345" → "12,345").
+# Built-in GDScript has nothing equivalent.
+func _fmt_thousands(n: int) -> String:
+	var s := str(n)
+	var sign := ""
+	if s.begins_with("-"):
+		sign = "-"
+		s = s.substr(1)
+	var out := ""
+	var count := 0
+	for i in range(s.length() - 1, -1, -1):
+		out = s[i] + out
+		count += 1
+		if count == 3 and i > 0:
+			out = "," + out
+			count = 0
+	return sign + out

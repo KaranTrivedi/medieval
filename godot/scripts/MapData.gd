@@ -77,8 +77,13 @@ func _load_map() -> void:
 		economy[cid] = eco_data[cid]
 
 	is_loaded = true
-	print("MapData: Loaded %d duchies, %d counties, %d baronies, %d fiefs." % [
-		duchies.size(), counties.size(), baronies.size(), fiefs.size()
+	# Baronies live nested inside counties[cn].baronies (not the legacy
+	# top-level dict), so sum them across all counties for the real count.
+	var barony_total: int = 0
+	for cn in counties:
+		barony_total += int(counties[cn].get("baronies", []).size())
+	print("MapData: Loaded %d duchies, %d counties, %d baronies." % [
+		duchies.size(), counties.size(), barony_total
 	])
 	map_loaded.emit()
 
@@ -125,6 +130,116 @@ func find_path(from_name: String, to_name: String) -> Array:
 	return []
 
 # ── GEOMETRY ──────────────────────────────────────────────────────────────────
+# ── AGGREGATION HELPERS ──────────────────────────────────────────────────────
+# Roll county-level economy into duchy and country totals. Baronies aren't
+# yet a source of truth for economy (LADs don't carry medieval income data);
+# for now they're a pro-rata share of their parent county so the InfoPanel
+# has plausible numbers to display.
+
+# Sum income / garrison / population across every county in a duchy.
+# Args:
+#   duchy_id (String): duchy key (e.g. "lancaster").
+# Returns:
+#   Dictionary: {total_income, garrison, population, county_count, barony_count}
+func aggregate_duchy(duchy_id: String) -> Dictionary:
+	var out: Dictionary = {
+		"total_income": 0, "garrison": 0, "population": 0,
+		"county_count": 0, "barony_count": 0,
+	}
+	for cn in counties:
+		var co: Dictionary = counties[cn]
+		if str(co.get("duchy", "")) != duchy_id:
+			continue
+		out.total_income += int(co.get("income", 0))
+		out.garrison += int(co.get("garrison", 0))
+		out.population += int(co.get("population", 0))
+		out.county_count += 1
+		var bs: Array = co.get("baronies", [])
+		out.barony_count += bs.size()
+	return out
+
+
+# Sum across every duchy that belongs to a country.
+# Args:
+#   country (String): "England" / "Wales" / "Scotland".
+# Returns:
+#   Dictionary: {total_income, garrison, population, county_count, duchy_count, barony_count}
+func aggregate_country(country: String) -> Dictionary:
+	var out: Dictionary = {
+		"total_income": 0, "garrison": 0, "population": 0,
+		"county_count": 0, "duchy_count": 0, "barony_count": 0,
+	}
+	var seen_duchies: Dictionary = {}
+	for cn in counties:
+		var co: Dictionary = counties[cn]
+		var d: String = str(co.get("duchy", ""))
+		if COUNTRY_BY_DUCHY.get(d, "") != country:
+			continue
+		out.total_income += int(co.get("income", 0))
+		out.garrison += int(co.get("garrison", 0))
+		out.population += int(co.get("population", 0))
+		out.county_count += 1
+		out.barony_count += int(co.get("baronies", []).size())
+		if not seen_duchies.has(d):
+			seen_duchies[d] = true
+			out.duchy_count += 1
+	return out
+
+
+# Per-barony pro-rata share of its county's economy. Equal split for now.
+# Once we wire real per-LAD economy data this returns those values directly.
+# Args:
+#   county_name (String), barony_id (String): identifiers of the target barony.
+# Returns:
+#   Dictionary: {income, population, garrison}
+func aggregate_barony(county_name: String, _barony_id: String) -> Dictionary:
+	var co: Dictionary = counties.get(county_name, {})
+	var bs: Array = co.get("baronies", [])
+	var n: int = maxi(1, bs.size())
+	return {
+		"income":     int(co.get("income", 0))     / n,
+		"garrison":   int(co.get("garrison", 0))   / n,
+		"population": int(co.get("population", 0)) / n,
+	}
+
+
+# Hit-test the duchy polygons. Returns the duchy id whose union polygon
+# contains world_pos, or "" if none.
+func duchy_at(world_pos: Vector2, world_scale: Vector2 = Vector2(1, 1)) -> String:
+	for did in duchies:
+		var rings: Array = duchies[did].get("polygons", [])
+		for raw_ring in rings:
+			if raw_ring.size() < 3:
+				continue
+			var ring := PackedVector2Array()
+			for pt in raw_ring:
+				ring.append(Vector2(pt[0], pt[1]) * world_scale)
+			if Geometry2D.is_point_in_polygon(world_pos, ring):
+				return did
+	return ""
+
+
+# Hit-test the baronies (LAD-level polygons stored per county). Returns
+# {county, id, name} or {} when nothing matches.
+func barony_at(world_pos: Vector2, world_scale: Vector2 = Vector2(1, 1)) -> Dictionary:
+	for cn in counties:
+		var bs: Array = counties[cn].get("baronies", [])
+		for b in bs:
+			for raw_ring in b.get("polygons", []):
+				if raw_ring.size() < 3:
+					continue
+				var ring := PackedVector2Array()
+				for pt in raw_ring:
+					ring.append(Vector2(pt[0], pt[1]) * world_scale)
+				if Geometry2D.is_point_in_polygon(world_pos, ring):
+					return {
+						"county": cn,
+						"id": b.get("id", ""),
+						"name": b.get("name", ""),
+					}
+	return {}
+
+
 func get_polygons(county_name: String, world_scale: Vector2 = Vector2(1, 1)) -> Array:
 	var co = get_county(county_name)
 	if co.is_empty():
@@ -321,11 +436,9 @@ func build_county_borders(parent: Node2D, world_scale: Vector2 = Vector2(4, 4)) 
 #   world_scale (Vector2): same scale as everything else.
 # Returns: void
 func build_baronies(border_parent: Node2D, label_parent: Node2D, world_scale: Vector2 = Vector2(4, 4)) -> void:
-	const BARONY_BORDER_COLOR := Color(0.18, 0.13, 0.07, 0.80)
-	# Target screen-pixel width for barony outlines — fixed (not on a slider)
-	# because they only appear at very deep zoom so users will mostly see the
-	# absolute thinnest possible hairline.
-	const BARONY_BORDER_PX := 0.6
+	const BARONY_BORDER_COLOR := Color(0.10, 0.07, 0.03, 0.95)
+	# Target screen-pixel width — bumped up so the dashes register clearly.
+	const BARONY_BORDER_PX := 1.4
 
 	var border_count := 0
 	var dashed_count := 0
@@ -358,6 +471,10 @@ func build_baronies(border_parent: Node2D, label_parent: Node2D, world_scale: Ve
 				line.antialiased = false
 				line.set_meta("screen_px", BARONY_BORDER_PX)
 				line.set_meta("zoom_band", "barony")
+				line.set_meta("barony_id", b.get("id", ""))
+				# Remember the base colour so the selection-highlight code
+				# can restore it on deselect (it swaps to gold on select).
+				line.set_meta("base_color", BARONY_BORDER_COLOR)
 				line.visible = false
 				border_parent.add_child(line)
 				border_count += 1
@@ -367,6 +484,8 @@ func build_baronies(border_parent: Node2D, label_parent: Node2D, world_scale: Ve
 				dashed.color = BARONY_BORDER_COLOR
 				dashed.screen_px = BARONY_BORDER_PX
 				dashed.set_meta("zoom_band", "barony_dashed")
+				dashed.set_meta("barony_id", b.get("id", ""))
+				dashed.set_meta("base_color", BARONY_BORDER_COLOR)
 				dashed.visible = false
 				border_parent.add_child(dashed)
 				dashed_count += 1

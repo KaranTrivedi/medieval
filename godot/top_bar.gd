@@ -5,10 +5,11 @@
 
 extends Panel
 
-@onready var turn_label: Label       = $HBox/TurnLabel
-@onready var season_label: Label     = $HBox/SeasonLabel
-@onready var treasury_label: Label   = $HBox/TreasuryLabel
-@onready var end_turn_button: Button = $HBox/EndTurnButton
+@onready var turn_label: Label         = $HBox/TurnLabel
+@onready var season_label: Label       = $HBox/SeasonLabel
+@onready var treasury_label: Label     = $HBox/TreasuryLabel
+@onready var end_turn_button: Button   = $HBox/EndTurnButton
+@onready var settings_button: Button   = $HBox/SettingsButton
 
 # Index 0..3 ↔ season number stored in the turns table. Order matches the
 # (prev % 4) math in GameState.advance_turn.
@@ -21,8 +22,18 @@ const SEASON_NAMES: Array = ["Spring", "Summer", "Autumn", "Winter"]
 # Returns: void
 func _ready() -> void:
 	end_turn_button.pressed.connect(_on_end_turn_pressed)
+	settings_button.pressed.connect(_on_settings_pressed)
 	GameState.state_changed.connect(refresh)
 	refresh()
+
+
+# Settings button → toggle the SettingsPanel, which now also hosts Save Game
+# and Quit-to-Main-Menu. Mirrors what the O keyboard shortcut does.
+func _on_settings_pressed() -> void:
+	# Settings panel lives on the same UI/Control as TopBar — sibling lookup.
+	var panel := get_node_or_null("../../SettingsPanel")
+	if panel != null:
+		panel.visible = not panel.visible
 
 
 # Repaint every label from current GameState/DB values. Called both at startup

@@ -12,9 +12,9 @@ extends Node2D
 
 @export var polygon: PackedVector2Array = []   # world-space vertices, NOT closed
 @export var color: Color = Color(0.18, 0.13, 0.07, 0.85)
-@export var screen_px: float = 0.6             # target on-screen thickness
-@export var dash_world: float = 10.0           # length of each dash, world units
-@export var gap_world: float = 6.0             # length of each gap, world units
+@export var screen_px: float = 1.4             # target on-screen thickness
+@export var dash_world: float = 22.0           # length of each dash, world units
+@export var gap_world: float = 12.0            # length of each gap, world units
 
 
 # Engine-invoked when the node enters the tree. We could leave the default

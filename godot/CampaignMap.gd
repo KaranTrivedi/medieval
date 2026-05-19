@@ -6,6 +6,10 @@ extends Node2D
 @onready var camera: Camera2D = $Camera2D
 @onready var ui: CanvasLayer = $UI
 @onready var settings_panel: Panel = $UI/Control/SettingsPanel
+@onready var tooltip: Panel = $UI/Control/Tooltip
+@onready var tooltip_label: Label = $UI/Control/Tooltip/Label
+
+const WORLD_SCALE := Vector2(4, 4)
 
 # Zoom thresholds for the label LOD system come from the MapSettings
 # autoload — adjustable at runtime via the Settings panel and persisted to
@@ -15,6 +19,11 @@ extends Node2D
 # name. Multiplied with their base colour, so values >1 brighten.
 const SELECTED_TINT := Color(1.45, 1.25, 0.85)
 const NORMAL_TINT := Color.WHITE
+
+# Barony outlines are dark + thin — a modulate-style tint isn't visible on
+# them. So we swap the line colour directly to this gold instead, and
+# restore the original from the "base_color" meta stored at build time.
+const SELECTED_BARONY_COLOR := Color(0.98, 0.78, 0.20, 1.0)
 
 # Camera tunables.
 const ZOOM_STEP := 1.15            # multiplicative factor per wheel notch
@@ -34,6 +43,14 @@ const UI_PANEL_WIDTH := 320.0
 # not by Polygon2D node, because a single county can be drawn as several polygons
 # (mainland + islands). Empty string means no selection.
 var _selected_county_name: String = ""
+
+# Currently-selected region type: "country" / "duchy" / "county" / "barony" / "".
+# Drives the InfoPanel render and the clear-selection logic.
+var _selected_type: String = ""
+# Per-tier IDs for the active selection — only one is non-empty at a time.
+var _selected_country: String = ""
+var _selected_duchy: String = ""
+var _selected_barony: String = ""
 
 # Middle-mouse-drag state.
 var _is_panning: bool = false
@@ -80,12 +97,22 @@ func build_map():
 	MapData.build_baronies(border_layer, label_layer, Vector2(4, 4))
 	MapData.build_labels(label_layer, Vector2(4, 4))
 
-	var polygon_count = 0
+	# Quick scene-tree audit so the build summary actually reflects everything
+	# (county fills + barony outlines, both dashed and solid).
+	var fill_count := 0
 	for child in county_layer.get_children():
 		if child is Polygon2D:
-			polygon_count += 1
-
-	print("Polygons created: %d" % polygon_count)
+			fill_count += 1
+	var border_solid := 0
+	var border_dashed := 0
+	for child in border_layer.get_children():
+		if child is Line2D:
+			border_solid += 1
+		elif child.has_method("queue_redraw"):  # DashedPolygon
+			border_dashed += 1
+	print("Scene built: %d fills, %d solid lines, %d dashed barony lines, %d label nodes." % [
+		fill_count, border_solid, border_dashed, label_layer.get_child_count()
+	])
 
 	camera.enabled = true
 	camera.make_current()
@@ -145,6 +172,14 @@ func _update_label_visibility() -> void:
 		band = 3
 	if band == _last_zoom_band:
 		return
+	# Band crossed — what the player can select just changed, so any current
+	# selection no longer makes sense. Clear it (drops tint + hides panel).
+	# Skip on first build (_last_zoom_band == -1 sentinel).
+	if _last_zoom_band != -1:
+		_clear_selection()
+		# Re-evaluate the tooltip too: the same world point now maps to a
+		# different tier.
+		_update_tooltip(get_viewport().get_mouse_position(), get_global_mouse_position())
 	_last_zoom_band = band
 	var want_country := (band == 0)
 	var want_duchy   := (band == 1)
@@ -236,11 +271,11 @@ func _unhandled_input(event: InputEvent) -> void:
 					# as a click. Hit on a county → select it. Empty space
 					# (and Escape) both clear the current selection.
 					if not _left_dragged:
-						var hit := _county_polygon_at(get_global_mouse_position())
-						if hit:
-							_select_county(hit.get_meta("county_name", ""))
-						else:
+						var hit := _hit_test_at_band(get_global_mouse_position())
+						if hit.is_empty():
 							_clear_selection()
+						else:
+							_dispatch_selection(hit)
 			MOUSE_BUTTON_MIDDLE:
 				_is_panning = mb.pressed
 			MOUSE_BUTTON_WHEEL_UP:
@@ -259,8 +294,12 @@ func _unhandled_input(event: InputEvent) -> void:
 					_left_dragged = true
 			if _left_dragged:
 				camera.position -= mm.relative / camera.zoom
+				_hide_tooltip()
 		elif _is_panning:
 			camera.position -= mm.relative / camera.zoom
+			_hide_tooltip()
+		else:
+			_update_tooltip(mm.position, get_global_mouse_position())
 	elif event is InputEventKey and event.pressed and not event.echo:
 		match (event as InputEventKey).keycode:
 			KEY_ESCAPE:
@@ -305,6 +344,10 @@ func _zoom_at_cursor(factor: float) -> void:
 	camera.zoom = Vector2(new_zoom, new_zoom)
 	var mouse_world_after := get_global_mouse_position()
 	camera.position += mouse_world_before - mouse_world_after
+	# Tooltip's tier depends on zoom — refresh even though the mouse hasn't
+	# moved on screen. _update_label_visibility on the next frame will also
+	# reset the selection if the band crossed a threshold.
+	_update_tooltip(get_viewport().get_mouse_position(), get_global_mouse_position())
 
 
 # Find the topmost Polygon2D under a world-space point.
@@ -316,6 +359,177 @@ func _zoom_at_cursor(factor: float) -> void:
 #       same space the polygon vertices live in.
 # Returns:
 #   Polygon2D: The hit polygon, or null if the point is outside every county.
+# Hit-test at the current zoom band. Returns a dict describing what was
+# clicked, dispatched by which label LOD tier is active:
+#   { "type": "country"|"duchy"|"county"|"barony", "id": String, "name": String,
+#     "county": String (for barony only) }
+# Empty {} when nothing was hit.
+func _hit_test_at_band(world_pos: Vector2) -> Dictionary:
+	var z: float = camera.zoom.x
+	# At BARONY band, test baronies first; fall back to county if no barony
+	# polygon contains the cursor (e.g. clicking the sea inside a county bbox).
+	if z >= MapSettings.county_zoom_max:
+		var b: Dictionary = MapData.barony_at(world_pos, WORLD_SCALE)
+		if not b.is_empty():
+			return {"type": "barony", "id": b.get("id", ""),
+					"name": b.get("name", ""), "county": b.get("county", "")}
+	# County polygon is the universal anchor — used for the COUNTY tier
+	# and as the lookup-key for the DUCHY / COUNTRY tiers.
+	var poly: Polygon2D = _county_polygon_at(world_pos)
+	if poly == null:
+		return {}
+	var cn: String = str(poly.get_meta("county_name", ""))
+	if cn == "":
+		return {}
+	if z < MapSettings.country_zoom_max:
+		var d: String = str(MapData.counties.get(cn, {}).get("duchy", ""))
+		var country: String = MapData.COUNTRY_BY_DUCHY.get(d, "")
+		if country == "":
+			return {}
+		return {"type": "country", "id": country, "name": country}
+	if z < MapSettings.duchy_zoom_max:
+		var d2: String = str(MapData.counties.get(cn, {}).get("duchy", ""))
+		var dname: String = str(MapData.duchies.get(d2, {}).get("name", d2))
+		return {"type": "duchy", "id": d2, "name": dname}
+	# COUNTY band — and the BARONY fallback path also lands here.
+	return {"type": "county", "id": cn, "name": cn}
+
+
+# Route a hit to the right selector + InfoPanel update.
+func _dispatch_selection(hit: Dictionary) -> void:
+	match str(hit.get("type", "")):
+		"country": _select_country(hit)
+		"duchy":   _select_duchy(hit)
+		"county":  _select_county(str(hit.get("id", "")))
+		"barony":  _select_barony(hit)
+
+
+# Show + populate the InfoPanel for a country-tier selection. Tints every
+# county whose duchy maps to this country.
+func _select_country(hit: Dictionary) -> void:
+	_clear_selection_tint()
+	_selected_type = "country"
+	_selected_county_name = ""
+	_selected_country = str(hit.get("id", ""))
+	for cn in MapData.counties:
+		var d: String = str(MapData.counties[cn].get("duchy", ""))
+		if MapData.COUNTRY_BY_DUCHY.get(d, "") == _selected_country:
+			_tint_county(cn, SELECTED_TINT)
+	var stats: Dictionary = MapData.aggregate_country(_selected_country)
+	stats["type"] = "country"
+	stats["name"] = hit.get("name", "")
+	ui.update_panel_typed(stats)
+
+
+# Show + populate the InfoPanel for a duchy-tier selection. Tints all
+# counties of that duchy so the user sees the duchy as a coloured group.
+func _select_duchy(hit: Dictionary) -> void:
+	_clear_selection_tint()
+	_selected_type = "duchy"
+	_selected_county_name = ""
+	_selected_duchy = str(hit.get("id", ""))
+	for cn in MapData.counties:
+		if str(MapData.counties[cn].get("duchy", "")) == _selected_duchy:
+			_tint_county(cn, SELECTED_TINT)
+	var lord: String = str(MapData.duchies.get(_selected_duchy, {}).get("lord", ""))
+	var stats: Dictionary = MapData.aggregate_duchy(_selected_duchy)
+	stats["type"] = "duchy"
+	stats["name"] = hit.get("name", "")
+	stats["lord"] = lord
+	ui.update_panel_typed(stats)
+
+
+# Show + populate the InfoPanel for a barony-tier selection. Tints the
+# barony's own outline (both solid and dashed versions, matched via the
+# "barony_id" meta tag on each Line2D / DashedPolygon).
+func _select_barony(hit: Dictionary) -> void:
+	_clear_selection_tint()
+	_selected_type = "barony"
+	_selected_county_name = ""
+	_selected_barony = str(hit.get("id", ""))
+	# Swap the colour of every outline (solid + dashed) belonging to this
+	# barony to the highlight gold. Modulate is too subtle on thin dark lines.
+	for child in border_layer.get_children():
+		if str(child.get_meta("barony_id", "")) != _selected_barony:
+			continue
+		if child is Line2D:
+			(child as Line2D).default_color = SELECTED_BARONY_COLOR
+		elif child.has_method("queue_redraw"):  # DashedPolygon
+			child.color = SELECTED_BARONY_COLOR
+			child.queue_redraw()
+	# Also tint the parent county for additional visual context.
+	var parent_county: String = str(hit.get("county", ""))
+	if parent_county != "":
+		_tint_county(parent_county, Color(1.15, 1.10, 0.95))
+	# Aggregate barony economy from the parent county's pro-rata share so
+	# we have something meaningful to display until per-barony data lands.
+	var stats: Dictionary = MapData.aggregate_barony(parent_county, _selected_barony)
+	stats["type"] = "barony"
+	stats["name"] = hit.get("name", "")
+	stats["county"] = parent_county
+	stats["id"] = _selected_barony
+	ui.update_panel_typed(stats)
+
+
+# Reset whatever tinting is currently applied without touching state vars.
+# Used at the top of each new select_* to undo the previous selection's tint.
+func _clear_selection_tint() -> void:
+	match _selected_type:
+		"county":
+			if _selected_county_name != "":
+				_tint_county(_selected_county_name, NORMAL_TINT)
+		"duchy", "country":
+			# Both tiers tint a set of counties — easier to reset all than track which.
+			for cn in MapData.counties:
+				_tint_county(cn, NORMAL_TINT)
+		"barony":
+			# Restore each outline's base colour (stored on the node as meta
+			# at build time) AND drop the parent-county tint.
+			if _selected_barony != "":
+				for child in border_layer.get_children():
+					if str(child.get_meta("barony_id", "")) != _selected_barony:
+						continue
+					var base: Color = child.get_meta("base_color", Color.WHITE)
+					if child is Line2D:
+						(child as Line2D).default_color = base
+					elif child.has_method("queue_redraw"):
+						child.color = base
+						child.queue_redraw()
+			for cn in MapData.counties:
+				_tint_county(cn, NORMAL_TINT)
+	_selected_country = ""
+	_selected_duchy = ""
+	_selected_barony = ""
+
+
+# ── TOOLTIP ───────────────────────────────────────────────────────────────────
+
+# Update or hide the hover tooltip based on what's under the cursor at the
+# current zoom band. Mirrors the click hit-test logic so the tooltip names
+# exactly what would be selected if the user clicked.
+#
+# Args:
+#   screen_pos (Vector2): mouse position in screen coordinates (for placement).
+#   world_pos  (Vector2): mouse position in world coordinates (for hit-test).
+# Returns: void
+func _update_tooltip(screen_pos: Vector2, world_pos: Vector2) -> void:
+	if tooltip == null or tooltip_label == null:
+		return
+	var hit: Dictionary = _hit_test_at_band(world_pos)
+	if hit.is_empty():
+		tooltip.visible = false
+		return
+	tooltip_label.text = str(hit.get("name", ""))
+	# Place 16px right + 16px below the cursor.
+	tooltip.position = screen_pos + Vector2(16, 16)
+	tooltip.visible = true
+
+
+func _hide_tooltip() -> void:
+	if tooltip != null:
+		tooltip.visible = false
+
+
 func _county_polygon_at(world_pos: Vector2) -> Polygon2D:
 	var children := county_layer.get_children()
 	for i in range(children.size() - 1, -1, -1):
@@ -339,26 +553,23 @@ func _select_county(county_name: String) -> void:
 	if county_name == "":
 		_clear_selection()
 		return
-	if county_name == _selected_county_name:
-		return  # idempotent — clicking the same county twice does nothing
-	_tint_county(_selected_county_name, NORMAL_TINT)
+	if _selected_type == "county" and county_name == _selected_county_name:
+		return  # idempotent
+	_clear_selection_tint()
+	_selected_type = "county"
 	_selected_county_name = county_name
 	_tint_county(county_name, SELECTED_TINT)
 
-	# Pull a copy of the county record so we can pass it to the UI without
-	# leaking the live dictionary reference held by MapData.
 	var data: Dictionary = MapData.get_county(county_name).duplicate()
-	ui.update_panel(data, county_name)
+	data["type"] = "county"
+	data["name"] = county_name
+	ui.update_panel_typed(data)
 
 
-# Reset the current selection and clear the InfoPanel back to placeholders.
-#
-# Returns:
-#   void
+# Reset the current selection: drop tinting AND hide the InfoPanel.
 func _clear_selection() -> void:
-	if _selected_county_name == "":
-		return
-	_tint_county(_selected_county_name, NORMAL_TINT)
+	_clear_selection_tint()
+	_selected_type = ""
 	_selected_county_name = ""
 	if ui.has_method("clear_panel"):
 		ui.clear_panel()

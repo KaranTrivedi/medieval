@@ -5,6 +5,7 @@
 [ext_resource type="Script" uid="uid://so2rxas51hka" path="res://top_bar.gd" id="3_topbar"]
 [ext_resource type="Texture2D" uid="uid://xesnbi1kn3rg" path="res://assets/page_seamless_01.png" id="4_brjqc"]
 [ext_resource type="Script" uid="uid://b65mvqcdibu11" path="res://settings_panel.gd" id="5_settings"]
+[ext_resource type="Script" path="res://db_browser.gd" id="6_dbbrowser"]
 
 [sub_resource type="LabelSettings" id="LabelSettings_4"]
 
@@ -13,24 +14,6 @@
 [sub_resource type="LabelSettings" id="LabelSettings_1"]
 outline_size = 1
 outline_color = Color(0.05, 0.04, 0.01, 1)
-
-[sub_resource type="LabelSettings" id="LabelSettings_2"]
-
-[sub_resource type="LabelSettings" id="LabelSettings_3"]
-
-[sub_resource type="LabelSettings" id="LabelSettings_5"]
-
-[sub_resource type="LabelSettings" id="LabelSettings_7"]
-
-[sub_resource type="LabelSettings" id="LabelSettings_8"]
-
-[sub_resource type="LabelSettings" id="LabelSettings_9"]
-
-[sub_resource type="LabelSettings" id="LabelSettings_10"]
-
-[sub_resource type="LabelSettings" id="LabelSettings_11"]
-
-[sub_resource type="LabelSettings" id="LabelSettings_12"]
 
 [node name="CampaignMap" type="Node2D" unique_id=215796415]
 script = ExtResource("1_bvam6")
@@ -101,7 +84,12 @@ label_settings = SubResource("LabelSettings_1")
 layout_mode = 2
 text = "End Turn"
 
+[node name="SettingsButton" type="Button" parent="UI/Control/TopBar/HBox"]
+layout_mode = 2
+text = "⚙ Settings"
+
 [node name="InfoPanel" type="Panel" parent="UI/Control" unique_id=1400951060]
+visible = false
 layout_mode = 0
 anchor_left = 1.0
 anchor_right = 1.0
@@ -116,105 +104,47 @@ offset_left = 10.0
 offset_top = 10.0
 offset_right = -10.0
 offset_bottom = -10.0
-theme_override_constants/separation = 12
-
-[node name="CountyName" type="Label" parent="UI/Control/InfoPanel/VBoxContainer" unique_id=1775943899]
-layout_mode = 2
-text = "County"
-label_settings = SubResource("LabelSettings_1")
-
-[node name="DuchySection" type="HBoxContainer" parent="UI/Control/InfoPanel/VBoxContainer" unique_id=1755789090]
-layout_mode = 2
-theme_override_constants/separation = 20
-
-[node name="DuchyLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/DuchySection" unique_id=335167015]
-layout_mode = 2
-text = "DUCHY"
-label_settings = SubResource("LabelSettings_2")
-
-[node name="DuchyValue" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/DuchySection" unique_id=1107158333]
-layout_mode = 2
-text = "—"
-label_settings = SubResource("LabelSettings_3")
-
-[node name="GovernanceSection" type="VBoxContainer" parent="UI/Control/InfoPanel/VBoxContainer" unique_id=1617986986]
-layout_mode = 2
 theme_override_constants/separation = 8
-
-[node name="GovernanceTitle" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection" unique_id=447565681]
-layout_mode = 2
-text = "GOVERNANCE"
-label_settings = SubResource("LabelSettings_4")
-
-[node name="EarlHBox" type="HBoxContainer" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection" unique_id=450772806]
-layout_mode = 2
-theme_override_constants/separation = 16
-
-[node name="EarlLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/EarlHBox" unique_id=1674444917]
-layout_mode = 2
-text = "Earl"
-label_settings = SubResource("LabelSettings_5")
-
-[node name="EarlValue" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/EarlHBox" unique_id=900242142]
-layout_mode = 2
-text = "—"
-label_settings = SubResource("LabelSettings_6")
-
-[node name="IncomeHBox" type="HBoxContainer" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection" unique_id=1272783883]
-layout_mode = 2
-theme_override_constants/separation = 16
-
-[node name="IncomeLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/IncomeHBox" unique_id=857586692]
-layout_mode = 2
-text = "Income"
-label_settings = SubResource("LabelSettings_7")
-
-[node name="IncomeValue" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/IncomeHBox" unique_id=453257915]
-layout_mode = 2
-text = "— £/yr"
-label_settings = SubResource("LabelSettings_8")
-
-[node name="GarrisonHBox" type="HBoxContainer" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection" unique_id=639050078]
-layout_mode = 2
-theme_override_constants/separation = 16
-
-[node name="GarrisonLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/GarrisonHBox" unique_id=1189038080]
-layout_mode = 2
-text = "Garrison"
-label_settings = SubResource("LabelSettings_9")
-
-[node name="GarrisonValue" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/GarrisonHBox" unique_id=1652467760]
-layout_mode = 2
-text = "—"
-label_settings = SubResource("LabelSettings_10")
-
-[node name="PopulationHBox" type="HBoxContainer" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection" unique_id=244394825]
-layout_mode = 2
-theme_override_constants/separation = 16
-
-[node name="PopulationLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/PopulationHBox" unique_id=1867110509]
-layout_mode = 2
-text = "Population"
-label_settings = SubResource("LabelSettings_11")
-
-[node name="PopulationValue" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/PopulationHBox" unique_id=2089627620]
-layout_mode = 2
-text = "—"
-label_settings = SubResource("LabelSettings_12")
-
-[node name="Spacer" type="Control" parent="UI/Control/InfoPanel/VBoxContainer" unique_id=840702611]
-layout_mode = 2
-size_flags_vertical = 3
-
-[node name="SaveButton" type="Button" parent="UI/Control/InfoPanel/VBoxContainer" unique_id=1575338710]
-layout_mode = 2
-text = "Save Game"
 
 [node name="SettingsPanel" type="Panel" parent="UI/Control" unique_id=2128913537]
 visible = false
 layout_mode = 0
-offset_left = 14.0
+anchor_left = 1.0
+anchor_top = 0.0
+anchor_right = 1.0
+anchor_bottom = 0.0
+offset_left = -370.0
 offset_top = 54.0
-offset_right = 360.0
-offset_bottom = 510.0
+offset_right = -10.0
+offset_bottom = 600.0
 script = ExtResource("5_settings")
+
+[node name="Tooltip" type="Panel" parent="UI/Control"]
+visible = false
+layout_mode = 0
+mouse_filter = 2
+offset_left = 0.0
+offset_top = 0.0
+offset_right = 200.0
+offset_bottom = 28.0
+
+[node name="Label" type="Label" parent="UI/Control/Tooltip"]
+layout_mode = 0
+offset_left = 6.0
+offset_top = 4.0
+offset_right = 194.0
+offset_bottom = 24.0
+text = ""
+
+[node name="DbBrowser" type="Panel" parent="UI/Control"]
+visible = false
+layout_mode = 0
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -480.0
+offset_top = -300.0
+offset_right = 480.0
+offset_bottom = 300.0
+script = ExtResource("6_dbbrowser")

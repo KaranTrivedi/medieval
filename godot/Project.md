@@ -668,9 +668,8 @@ The trebuchet is the king of siege weapons in this era:
 Text labels mostly fit inside the regions. Either curve the text or wrap, dont curve the text if it fits.
 Add the baronies.
 
-Clicking at different levels should select the corresponding duchy, county, barony. 
 We can have another overlay showing cities, castles, fiefs/key resources/mansions.
-Implement new game/load/delete existing game view.
+Text sometimes gets mushed in small sections. Allow wrapping where possible, make font smaller if needed.
 
 Also add in the chronicle tab, Information about end turns, whether there was a good harvest etc etc needs to be recorded with color codes in the logs.
 Need a table showing all baronaries , counties etc. in a cascading table. two tables needed, one by ownership, another by not owned. Show all related stats.

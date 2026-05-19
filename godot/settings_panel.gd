@@ -69,6 +69,28 @@ func _ready() -> void:
 		slider.value_changed.connect(func(v): _on_slider_changed(idx, v))
 		row.add_child(slider)
 
+	# Separator
+	var sep := HSeparator.new()
+	vbox.add_child(sep)
+
+	# Save / DB Browser / Main Menu — actions consolidated here per the
+	# user's request to pull these out of the right-side InfoPanel.
+	var save_btn := Button.new()
+	save_btn.text = "Save Game"
+	save_btn.pressed.connect(_on_save_pressed)
+	vbox.add_child(save_btn)
+	_save_button = save_btn
+
+	var db_btn := Button.new()
+	db_btn.text = "DB Browser"
+	db_btn.pressed.connect(_on_db_browser_pressed)
+	vbox.add_child(db_btn)
+
+	var menu_btn := Button.new()
+	menu_btn.text = "Quit to Main Menu"
+	menu_btn.pressed.connect(_on_main_menu_pressed)
+	vbox.add_child(menu_btn)
+
 	# Action row at the bottom: Reset + Close.
 	var actions := HBoxContainer.new()
 	actions.add_theme_constant_override("separation", 8)
@@ -83,6 +105,40 @@ func _ready() -> void:
 	close.pressed.connect(func(): visible = false)
 	close.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	actions.add_child(close)
+
+
+var _save_button: Button = null
+
+
+# Save the current working DB to a timestamped slot in user://saves/.
+# Briefly flashes the button label so the user gets visible feedback.
+func _on_save_pressed() -> void:
+	var ts: String = Time.get_datetime_string_from_system().replace(":", "-")
+	var path: String = "user://saves/save_%s.db" % ts
+	var ok: bool = GameState.save_to(path)
+	if ok and _save_button:
+		_save_button.text = "Saved!"
+		await get_tree().create_timer(1.2).timeout
+		if is_instance_valid(_save_button):
+			_save_button.text = "Save Game"
+	elif not ok:
+		push_error("Settings: save failed")
+
+
+# Return to the main menu (which is also the load/delete screen).
+func _on_main_menu_pressed() -> void:
+	get_tree().change_scene_to_file("res://MainMenu.tscn")
+
+
+# Toggle the SQLite DB Browser. The browser is a sibling node under
+# UI/Control — we walk up from this Panel to reach it.
+func _on_db_browser_pressed() -> void:
+	# Settings panel is at UI/Control/SettingsPanel; sibling is UI/Control/DbBrowser.
+	var browser := get_node_or_null("../DbBrowser")
+	if browser != null:
+		browser.visible = not browser.visible
+		if browser.visible and browser.has_method("_refresh_tables"):
+			browser._refresh_tables()
 
 
 # Slider drag handler. Writes back to MapSettings (which persists + emits
