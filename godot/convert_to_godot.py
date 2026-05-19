@@ -1,19 +1,25 @@
 """
 convert_to_godot.py
-Converts gb-topo_lad.json → england_godot.json
-with polygons as flat [x,y] arrays ready for Godot PackedVector2Array
+Converts data/gb-topo_lad.json → data/bg_godot.json
+with polygons as flat [x,y] arrays ready for Godot PackedVector2Array.
 
-Place gb-topo_lad.json in the same folder, then run:
+Run from the godot/ project directory:
     python convert_to_godot.py
 
-Output: england_godot.json → copy to res://data/ in your Godot project
+Borders are simplified at the ARC level (not per polygon) so shared edges
+between neighbouring counties come out identical — no gaps or overlaps.
 """
 
 import json
 import math
+import os
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+INPUT_PATH  = os.path.join(SCRIPT_DIR, "data", "gb-topo_lad.json")
+OUTPUT_PATH = os.path.join(SCRIPT_DIR, "data", "bg_godot.json")
 
 # ── LOAD TOPOJSON ──────────────────────────────────────────────────────────────
-with open("topologies/gb-topo_lad.json", "r") as f:
+with open(INPUT_PATH, "r") as f:
     topo = json.load(f)
 
 # ── DECODE ARCS (TopoJSON arc decoding) ────────────────────────────────────────
@@ -78,8 +84,8 @@ def geometry_to_polygons(geom):
     return polygons
 
 # ── MERCATOR PROJECTION ────────────────────────────────────────────────────────
-# Project lon/lat → pixel coordinates
-# We'll fit England into a 1000x1400 coordinate space for Godot
+# Project lon/lat → Godot pixel coordinates. Bounds are taken over ALL relevant
+# UK LADs (E/W/S) so Wales and Scotland fit on the canvas alongside England.
 
 def mercator(lon, lat):
     """Simple Mercator projection."""
@@ -87,35 +93,67 @@ def mercator(lon, lat):
     y = math.log(math.tan(math.pi / 4 + math.radians(lat) / 2))
     return x, y
 
-# First pass: find bounds of England
-all_lons, all_lats = [], []
 geoms = topo["objects"]["lad"]["geometries"]
-eng_geoms = [g for g in geoms if g["properties"]["LAD13CD"].startswith("E")]
+uk_geoms = [g for g in geoms if g["properties"]["LAD13CD"][0] in ("E", "W", "S")]
 
-for geom in eng_geoms:
+# Pass 1: collect every lon/lat that will land on the canvas, for bounds.
+all_lons, all_lats = [], []
+for geom in uk_geoms:
     for poly in geometry_to_polygons(geom):
         for lon, lat in poly:
             all_lons.append(lon)
             all_lats.append(lat)
 
-# Project bounds
 min_lon, max_lon = min(all_lons), max(all_lons)
 min_lat, max_lat = min(all_lats), max(all_lats)
 bx0, by0 = mercator(min_lon, min_lat)
 bx1, by1 = mercator(max_lon, max_lat)
 
-# Target: 1000 wide, height proportional
+# Target canvas: 1000 wide, height proportional to the projected aspect ratio.
 TARGET_W = 1000
 aspect = (by1 - by0) / (bx1 - bx0)
 TARGET_H = int(TARGET_W * aspect)
 PADDING = 30
 
 def project(lon, lat):
-    """Project lon/lat → Godot coordinates (0-1000 range, Y-down)."""
+    """Project lon/lat → Godot coordinates (0..TARGET_W, Y-down)."""
     mx, my = mercator(lon, lat)
     x = PADDING + (mx - bx0) / (bx1 - bx0) * (TARGET_W - 2 * PADDING)
     y = PADDING + (1 - (my - by0) / (by1 - by0)) * (TARGET_H - 2 * PADDING)
     return round(x, 1), round(y, 1)
+
+
+# ── ARC-LEVEL PROJECTION + SIMPLIFICATION ──────────────────────────────────────
+# TopoJSON arcs are SHARED between neighbouring geometries. Projecting and
+# simplifying each arc ONCE (instead of per-polygon, as the previous version
+# did) guarantees that a boundary shared by two counties comes out as exactly
+# the same point list on both sides — so there are no gaps or T-junctions.
+
+SIMPLIFY_SQ_THRESHOLD = 4.0   # px² minimum spacing (= 2px). Lower keeps more detail,
+                              # but Godot's Polygon2D triangulator chokes on dense
+                              # near-collinear runs in complex coastlines (Argyll,
+                              # Galloway, etc.) — 4.0 is the sweet spot between
+                              # detail and reliable rendering.
+
+def simplify_arc(coords):
+    """Drop colinear-ish intermediate points, but always keep both endpoints."""
+    if len(coords) <= 2:
+        return coords
+    out = [coords[0]]
+    for pt in coords[1:-1]:
+        dx = pt[0] - out[-1][0]
+        dy = pt[1] - out[-1][1]
+        if dx * dx + dy * dy > SIMPLIFY_SQ_THRESHOLD:
+            out.append(pt)
+    out.append(coords[-1])
+    return out
+
+# Project & simplify EACH ARC ONCE. After this, resolve_arc() returns the
+# already-projected, already-simplified coord list.
+arcs = [
+    simplify_arc([list(project(lon, lat)) for lon, lat in arc])
+    for arc in arcs
+]
 
 # ── LAD → HISTORIC COUNTY MAPPING ──────────────────────────────────────────────
 LAD_TO_COUNTY = {}
@@ -175,16 +213,35 @@ assign(['E06000024','E07000187','E07000188','E07000189','E07000190','E07000191']
 assign(['E06000026','E06000027','E07000040','E07000041','E07000042','E07000043','E07000044','E07000045','E07000046','E07000047'], 'Devon', 'cornwall')
 assign(['E06000052','E06000053'], 'Cornwall', 'cornwall')
 
-# Wales & Scotland (for completeness)
-for g in geoms:
-    code = g["properties"]["LAD13CD"]
-    name = g["properties"]["LAD13NM"]
-    if code.startswith("W"):
-        LAD_TO_COUNTY[code] = "Wales"
-        LAD_TO_DUCHY[code] = "wales"
-    elif code.startswith("S"):
-        LAD_TO_COUNTY[code] = "Scotland"
-        LAD_TO_DUCHY[code] = "scotland"
+# DUCHY OF GWYNEDD (Welsh-controlled north and east, Llywelyn's heartland)
+assign(['W06000001','W06000002','W06000003'], 'Gwynedd', 'gwynedd')                       # Anglesey + Gwynedd + Conwy
+assign(['W06000004','W06000005','W06000006'], 'Perfeddwlad', 'gwynedd')                   # Denbighshire + Flintshire + Wrexham
+assign(['W06000023'], 'Powys', 'gwynedd')                                                  # Powys LAD
+
+# DUCHY OF DEHEUBARTH (Welsh-controlled south-west)
+assign(['W06000008'], 'Ceredigion', 'deheubarth')                                          # Ceredigion LAD
+assign(['W06000009','W06000010'], 'Dyfed', 'deheubarth')                                   # Pembrokeshire + Carmarthenshire
+
+# DUCHY OF MORGANNWG (Norman Marcher-controlled south coast and SE)
+assign(['W06000011','W06000012','W06000013'], 'Gower', 'morgannwg')                        # Swansea + NPT + Bridgend
+assign(['W06000014','W06000015','W06000016','W06000018','W06000024'], 'Glamorgan', 'morgannwg')  # Vale + Cardiff + RCT + Caerphilly + Merthyr
+assign(['W06000019','W06000020','W06000021','W06000022'], 'Gwent', 'morgannwg')           # Blaenau Gwent + Torfaen + Monmouthshire + Newport
+
+# DUCHY OF HIGHLANDS (Scottish north, west, islands)
+assign(['S12000017'], 'Highland', 'highlands')                                             # Highland LAD
+assign(['S12000035','S12000013'], 'Argyll', 'highlands')                                   # Argyll & Bute + Eilean Siar
+assign(['S12000023','S12000027'], 'Orkney', 'highlands')                                   # Orkney + Shetland
+
+# EARLDOM OF MORAY (Scottish east coast / Pictland)
+assign(['S12000020','S12000033','S12000034','S12000041'], 'Moray', 'moray')                # Moray + Aberdeen City + Aberdeenshire + Angus
+assign(['S12000024','S12000030','S12000005'], 'Strathearn', 'moray')                       # Perth+Kinross + Stirling + Clackmannanshire
+assign(['S12000015','S12000042'], 'Fife', 'moray')                                         # Fife + Dundee City
+
+# EARLDOM OF LOTHIAN (Scottish south, Anglo-Norman)
+assign(['S12000019','S12000010','S12000040','S12000036','S12000014'], 'Lothian', 'lothian')  # Midlothian + East Lothian + West Lothian + Edinburgh + Falkirk
+assign(['S12000026'], 'Borders', 'lothian')                                                  # Scottish Borders
+assign(['S12000044','S12000029','S12000046','S12000038','S12000011','S12000039','S12000045','S12000018','S12000021','S12000028','S12000008'], 'Strathclyde', 'lothian')  # all Lanarkshires + Glasgow + Renfrewshires + Dunbartonshires + Inverclyde + Ayrshires
+assign(['S12000006'], 'Galloway', 'lothian')                                                # Dumfries and Galloway
 
 # ── COUNTY DATA ────────────────────────────────────────────────────────────────
 COUNTY_DATA = {
@@ -225,41 +282,62 @@ COUNTY_DATA = {
     'Somerset':       {'earl':'Roger de Clifford','income':220,'garrison':175,'pop':46000},
     'Devon':          {'earl':'Hugh de Courtenay','income':195,'garrison':160,'pop':40000},
     'Cornwall':       {'earl':'Richard of Cornwall','income':285,'garrison':210,'pop':52000},
-    'Wales':          {'earl':'Llywelyn ap Gruffudd','income':150,'garrison':200,'pop':120000},
-    'Scotland':       {'earl':'Alexander II','income':200,'garrison':300,'pop':180000},
+    # WALES — 8 counties grouped into 3 duchies (Gwynedd, Deheubarth, Morgannwg)
+    'Gwynedd':        {'earl':'Llywelyn ap Gruffudd','income':95,'garrison':220,'pop':22000},
+    'Perfeddwlad':    {'earl':'Dafydd ap Gruffudd','income':70,'garrison':140,'pop':18000},
+    'Powys':          {'earl':'Gruffudd Maelor','income':65,'garrison':120,'pop':15000},
+    'Ceredigion':     {'earl':'Maredudd ap Owain','income':55,'garrison':95,'pop':11000},
+    'Dyfed':          {'earl':'Rhys ap Maredudd','income':75,'garrison':120,'pop':16000},
+    'Gower':          {'earl':'John de Mowbray','income':95,'garrison':150,'pop':17000},
+    'Glamorgan':      {'earl':'Richard de Clare','income':155,'garrison':210,'pop':26000},
+    'Gwent':          {'earl':'Humphrey de Bohun','income':110,'garrison':170,'pop':19000},
+
+    # SCOTLAND — 11 counties grouped into 3 duchies (Highlands, Moray, Lothian)
+    'Highland':       {'earl':'William, Earl of Ross','income':85,'garrison':220,'pop':24000},
+    'Argyll':         {'earl':'Eóghan of Lorn','income':95,'garrison':190,'pop':19000},
+    'Orkney':         {'earl':'Magnus, Jarl of Orkney','income':55,'garrison':90,'pop':9000},
+    'Moray':          {'earl':'Alexander Comyn','income':140,'garrison':190,'pop':30000},
+    'Strathearn':     {'earl':'Malise II of Strathearn','income':145,'garrison':180,'pop':32000},
+    'Fife':           {'earl':'Malcolm, Earl of Fife','income':160,'garrison':180,'pop':36000},
+    'Lothian':        {'earl':'Crown Direct (Alexander II)','income':215,'garrison':250,'pop':46000},
+    'Borders':        {'earl':'Walter Comyn','income':115,'garrison':190,'pop':25000},
+    'Strathclyde':    {'earl':'Maldouen, Earl of Lennox','income':185,'garrison':210,'pop':40000},
+    'Galloway':       {'earl':'Dervorguilla of Galloway','income':125,'garrison':175,'pop':27000},
 }
 
 DUCHY_DATA = {
+    # ENGLISH DUCHIES
     'lancaster':   {'name':'Duchy of Lancaster','color':'#5a1212','lord':'Richard of Cornwall'},
     'chester':     {'name':'Earldom of Chester','color':'#3a1050','lord':'John de Lacy'},
     'march':       {'name':'Welsh Marches','color':'#3a2800','lord':'Wm. de Cantilupe'},
     'gloucester':  {'name':'Duchy of Gloucester','color':'#122a60','lord':'Roger Bigod'},
     'norfolk':     {'name':'Earldom of Norfolk','color':'#4a3200','lord':'Hugh Bigod'},
     'cornwall':    {'name':'Duchy of Cornwall','color':'#0e4028','lord':'Richard de Clare'},
-    'wales':       {'name':'Principality of Wales','color':'#0a2010','lord':'Llywelyn ap Gruffudd'},
-    'scotland':    {'name':'Kingdom of Scotland','color':'#0a1828','lord':'Alexander II'},
+    # WELSH DUCHIES — Welsh dragon green family
+    'gwynedd':     {'name':'Kingdom of Gwynedd','color':'#1f5024','lord':'Llywelyn ap Gruffudd'},
+    'deheubarth':  {'name':'Kingdom of Deheubarth','color':'#2e6024','lord':'Maredudd ap Owain'},
+    'morgannwg':   {'name':'Lordship of Morgannwg','color':'#5a3818','lord':'Richard de Clare'},   # Marcher brown
+    # SCOTTISH DUCHIES — Scottish blue/slate family
+    'highlands':   {'name':'Earldom of Ross & Isles','color':'#244266','lord':'William, Earl of Ross'},
+    'moray':       {'name':'Earldom of Moray','color':'#1a3a5a','lord':'Alexander Comyn'},
+    'lothian':     {'name':'Crown Lands of Lothian','color':'#4a4a14','lord':'Alexander II'},  # royal gold
 }
 
 # ── MERGE LADs INTO HISTORIC COUNTIES ──────────────────────────────────────────
+# At this point each arc has ALREADY been projected and simplified once.
+# geometry_to_polygons(geom) returns coord lists assembled from those shared
+# arcs — so neighbouring counties end up with point-identical shared edges.
 from collections import defaultdict
-county_polys = defaultdict(list)  # county_name → list of projected polygon rings
+county_polys = defaultdict(list)  # county_name → list of polygon rings
 
 for geom in geoms:
     code = geom["properties"]["LAD13CD"]
     county = LAD_TO_COUNTY.get(code)
     if not county:
         continue
-    for poly_coords in geometry_to_polygons(geom):
-        projected = [list(project(lon, lat)) for lon, lat in poly_coords]
-        # Simplify: skip points that are very close together
-        simplified = [projected[0]]
-        for pt in projected[1:]:
-            dx = pt[0] - simplified[-1][0]
-            dy = pt[1] - simplified[-1][1]
-            if dx*dx + dy*dy > 4:  # ~2px minimum distance
-                simplified.append(pt)
-        if len(simplified) >= 3:
-            county_polys[county].append(simplified)
+    for ring in geometry_to_polygons(geom):
+        if len(ring) >= 3:
+            county_polys[county].append([list(p) for p in ring])
 
 # ── COMPUTE CENTROIDS ──────────────────────────────────────────────────────────
 def centroid(polygons):
@@ -378,18 +456,15 @@ for cn, polys in county_polys.items():
     output["adjacency"][cn] = sorted(adjacency.get(cn, set()))
 
 # ── WRITE ──────────────────────────────────────────────────────────────────────
-with open("england_godot.json", "w") as f:
+with open(OUTPUT_PATH, "w") as f:
     json.dump(output, f, separators=(',', ':'))
 
 # Stats
 total_pts = sum(sum(len(p) for p in polys) for polys in county_polys.values())
-print(f"Output: england_godot.json")
+print(f"Output: {OUTPUT_PATH}")
 print(f"Counties: {len(output['counties'])}")
 print(f"Duchies: {len(output['duchies'])}")
 print(f"Total polygon points: {total_pts}")
 print(f"Coordinate space: {TARGET_W}x{TARGET_H}")
 print(f"Adjacency pairs: {sum(len(v) for v in adjacency.values())//2}")
-
-import os
-size = os.path.getsize("england_godot.json")
-print(f"File size: {size/1024:.0f} KB")
+print(f"File size: {os.path.getsize(OUTPUT_PATH)/1024:.0f} KB")

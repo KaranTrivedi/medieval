@@ -1,8 +1,17 @@
 extends Node2D
 
 @onready var county_layer: Node2D = $CountyLayer
+@onready var border_layer: Node2D = $BorderLayer
+@onready var label_layer: Node2D = $LabelLayer
 @onready var camera: Camera2D = $Camera2D
 @onready var ui: CanvasLayer = $UI
+
+# Zoom thresholds for the label LOD system.
+#   z < ZOOM_DUCHY_MAX        → only DUCHY-tier labels visible
+#   ZOOM_DUCHY_MAX..ZOOM_FIEF → only COUNTY-tier labels visible
+#   z >= ZOOM_FIEF            → (future) fief/city labels visible
+const ZOOM_DUCHY_MAX := 0.22
+const ZOOM_FIEF := 1.5
 
 # Tint applied to all Polygon2D nodes that share the currently-selected county
 # name. Multiplied with their base colour, so values >1 brighten.
@@ -36,6 +45,11 @@ var _is_panning: bool = false
 var _left_press_pos: Vector2 = Vector2.ZERO
 var _left_dragged: bool = false
 
+# Cache of last-applied zoom-band so the label visibility refresh only fires
+# when the zoom crosses a threshold. -1 = uninitialised.
+#   0 = duchy band, 1 = county band, 2 = fief band
+var _last_zoom_band: int = -1
+
 func _ready():
 	print("=== _ready() START ===")
 	if MapData.is_loaded:
@@ -50,24 +64,53 @@ func build_map():
 	print("County layer has %d children" % county_layer.get_child_count())
 
 	if not MapData.is_loaded:
-		push_error("MapData failed to load — check res://data/england_godot.json")
+		push_error("MapData failed to load — check res://data/bg_godot.json")
 		return
 	
 	print("Building polygons...")
 	MapData.build_county_polygons(county_layer, Vector2(4, 4))
-	
+	MapData.build_county_borders(border_layer, Vector2(4, 4))
+	MapData.build_labels(label_layer, Vector2(4, 4))
+
 	var polygon_count = 0
 	for child in county_layer.get_children():
 		if child is Polygon2D:
 			polygon_count += 1
-	
+
 	print("Polygons created: %d" % polygon_count)
-	
+
 	camera.enabled = true
 	camera.make_current()
 	fit_to_bounds()
+	_update_label_visibility()
 	print("Camera: position=%v, zoom=%v" % [camera.position, camera.zoom])
 	print("=== build_map() END ===")
+
+
+# Update Label visibility based on the camera's current zoom. Only iterates
+# children when the zoom band changes (cheap to call every frame).
+#
+# Returns: void
+func _update_label_visibility() -> void:
+	var z := camera.zoom.x
+	var band: int
+	if z < ZOOM_DUCHY_MAX:
+		band = 0
+	elif z < ZOOM_FIEF:
+		band = 1
+	else:
+		band = 2
+	if band == _last_zoom_band:
+		return
+	_last_zoom_band = band
+	var want_duchy := (band == 0)
+	var want_county := (band == 1)
+	for child in label_layer.get_children():
+		var t := str(child.get_meta("zoom_band", ""))
+		if t == "duchy":
+			child.visible = want_duchy
+		elif t == "county":
+			child.visible = want_county
 
 
 # Frame the camera on the full polygon bounding box, leaving room on the
@@ -83,8 +126,8 @@ func fit_to_bounds() -> void:
 		return
 	# Shift the focal point right so the geographic centre sits in the middle of
 	# the MAP area (viewport minus the panel), not the middle of the full window.
-	var vp_w: float = ProjectSettings.get_setting("display/window/size/viewport_width", 1152)
-	var vp_h: float = ProjectSettings.get_setting("display/window/size/viewport_height", 648)
+	var vp_w: float = ProjectSettings.get_setting("display/window/size/viewport_width", 2300)
+	var vp_h: float = ProjectSettings.get_setting("display/window/size/viewport_height", 1440)
 	var map_w := vp_w - UI_PANEL_WIDTH
 	# 10% margin so the map doesn't kiss the edges.
 	var zx := map_w / (bbox.size.x * 1.1)
@@ -175,6 +218,7 @@ func _process(delta: float) -> void:
 	if Input.is_key_pressed(KEY_S) or Input.is_key_pressed(KEY_DOWN):  dir.y += 1.0
 	if dir != Vector2.ZERO:
 		camera.position += dir.normalized() * PAN_KEY_PIXELS_PER_SEC * delta / camera.zoom
+	_update_label_visibility()
 
 
 # Zoom toward (or away from) the world point currently under the mouse cursor.

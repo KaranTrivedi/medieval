@@ -1,64 +1,46 @@
 [gd_scene format=3 uid="uid://i1hvn2qu4dum"]
 
 [ext_resource type="Script" uid="uid://c7q7qnbrv2bak" path="res://CampaignMap.gd" id="1_bvam6"]
-[ext_resource type="Script" path="res://ui_panel.gd" id="2_uipanel"]
-[ext_resource type="Script" path="res://top_bar.gd" id="3_topbar"]
+[ext_resource type="Script" uid="uid://caj7f0xue2hei" path="res://ui_panel.gd" id="2_uipanel"]
+[ext_resource type="Script" uid="uid://so2rxas51hka" path="res://top_bar.gd" id="3_topbar"]
+[ext_resource type="Texture2D" uid="uid://xesnbi1kn3rg" path="res://assets/page_seamless_01.png" id="4_brjqc"]
+
+[sub_resource type="LabelSettings" id="LabelSettings_4"]
+
+[sub_resource type="LabelSettings" id="LabelSettings_6"]
 
 [sub_resource type="LabelSettings" id="LabelSettings_1"]
-font_sizes/font_size = 20
-font_colors/font_color = Color(0.79, 0.59, 0.24, 1)
 outline_size = 1
 outline_color = Color(0.05, 0.04, 0.01, 1)
 
 [sub_resource type="LabelSettings" id="LabelSettings_2"]
-font_sizes/font_size = 10
-font_colors/font_color = Color(0.42, 0.31, 0.19, 1)
 
 [sub_resource type="LabelSettings" id="LabelSettings_3"]
-font_sizes/font_size = 12
-font_colors/font_color = Color(0.87, 0.79, 0.63, 1)
-
-[sub_resource type="LabelSettings" id="LabelSettings_4"]
-font_sizes/font_size = 11
-font_colors/font_color = Color(0.79, 0.59, 0.24, 1)
 
 [sub_resource type="LabelSettings" id="LabelSettings_5"]
-font_sizes/font_size = 10
-font_colors/font_color = Color(0.42, 0.31, 0.19, 1)
-
-[sub_resource type="LabelSettings" id="LabelSettings_6"]
-font_sizes/font_size = 11
-font_colors/font_color = Color(0.87, 0.79, 0.63, 1)
 
 [sub_resource type="LabelSettings" id="LabelSettings_7"]
-font_sizes/font_size = 10
-font_colors/font_color = Color(0.42, 0.31, 0.19, 1)
 
 [sub_resource type="LabelSettings" id="LabelSettings_8"]
-font_sizes/font_size = 11
-font_colors/font_color = Color(0.79, 0.59, 0.24, 1)
 
 [sub_resource type="LabelSettings" id="LabelSettings_9"]
-font_sizes/font_size = 10
-font_colors/font_color = Color(0.42, 0.31, 0.19, 1)
 
 [sub_resource type="LabelSettings" id="LabelSettings_10"]
-font_sizes/font_size = 11
-font_colors/font_color = Color(0.87, 0.79, 0.63, 1)
 
 [sub_resource type="LabelSettings" id="LabelSettings_11"]
-font_sizes/font_size = 10
-font_colors/font_color = Color(0.42, 0.31, 0.19, 1)
 
 [sub_resource type="LabelSettings" id="LabelSettings_12"]
-font_sizes/font_size = 11
-font_colors/font_color = Color(0.87, 0.79, 0.63, 1)
 
 [node name="CampaignMap" type="Node2D" unique_id=215796415]
 script = ExtResource("1_bvam6")
 
 [node name="CountyLayer" type="Node2D" parent="." unique_id=1787511703]
-visible = true
+
+[node name="Sprite2D" type="Sprite2D" parent="CountyLayer" unique_id=815277412]
+visible = false
+scale = Vector2(8, 8)
+texture = ExtResource("4_brjqc")
+offset = Vector2(300, 500)
 
 [node name="BorderLayer" type="Node2D" parent="." unique_id=1628466703]
 
@@ -69,19 +51,22 @@ visible = true
 [node name="UI" type="CanvasLayer" parent="." unique_id=1104534088]
 script = ExtResource("2_uipanel")
 
-[node name="Control" type="Control" parent="UI"]
+[node name="Control" type="Control" parent="UI" unique_id=1101124536]
+layout_mode = 3
+anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
 mouse_filter = 2
 
-[node name="TopBar" type="Panel" parent="UI/Control"]
+[node name="TopBar" type="Panel" parent="UI/Control" unique_id=528008623]
+layout_mode = 0
 anchor_right = 1.0
 offset_right = -320.0
 offset_bottom = 40.0
-mouse_filter = 0
 script = ExtResource("3_topbar")
 
-[node name="HBox" type="HBoxContainer" parent="UI/Control/TopBar"]
+[node name="HBox" type="HBoxContainer" parent="UI/Control/TopBar" unique_id=386469931]
+layout_mode = 0
 anchor_right = 1.0
 anchor_bottom = 1.0
 offset_left = 14.0
@@ -90,36 +75,38 @@ offset_right = -14.0
 offset_bottom = -4.0
 theme_override_constants/separation = 24
 
-[node name="TurnLabel" type="Label" parent="UI/Control/TopBar/HBox"]
+[node name="TurnLabel" type="Label" parent="UI/Control/TopBar/HBox" unique_id=1406457031]
+layout_mode = 2
 text = "Turn —"
 label_settings = SubResource("LabelSettings_4")
 
-[node name="SeasonLabel" type="Label" parent="UI/Control/TopBar/HBox"]
+[node name="SeasonLabel" type="Label" parent="UI/Control/TopBar/HBox" unique_id=914978632]
+layout_mode = 2
 text = "—"
 label_settings = SubResource("LabelSettings_6")
 
-[node name="Spacer" type="Control" parent="UI/Control/TopBar/HBox"]
+[node name="Spacer" type="Control" parent="UI/Control/TopBar/HBox" unique_id=1924366373]
+layout_mode = 2
 size_flags_horizontal = 3
 
-[node name="TreasuryLabel" type="Label" parent="UI/Control/TopBar/HBox"]
+[node name="TreasuryLabel" type="Label" parent="UI/Control/TopBar/HBox" unique_id=603385688]
+layout_mode = 2
 text = "0 £"
 label_settings = SubResource("LabelSettings_1")
 
-[node name="EndTurnButton" type="Button" parent="UI/Control/TopBar/HBox"]
+[node name="EndTurnButton" type="Button" parent="UI/Control/TopBar/HBox" unique_id=532210527]
+layout_mode = 2
 text = "End Turn"
 
-[node name="InfoPanel" type="Panel" parent="UI/Control"]
+[node name="InfoPanel" type="Panel" parent="UI/Control" unique_id=1400951060]
+layout_mode = 0
 anchor_left = 1.0
 anchor_right = 1.0
-anchor_top = 0.0
 anchor_bottom = 1.0
 offset_left = -320.0
-offset_right = 0.0
-offset_top = 0.0
-offset_bottom = 0.0
-mouse_filter = 0
 
-[node name="VBoxContainer" type="VBoxContainer" parent="UI/Control/InfoPanel"]
+[node name="VBoxContainer" type="VBoxContainer" parent="UI/Control/InfoPanel" unique_id=548813705]
+layout_mode = 0
 anchor_right = 1.0
 anchor_bottom = 1.0
 offset_left = 10.0
@@ -128,76 +115,94 @@ offset_right = -10.0
 offset_bottom = -10.0
 theme_override_constants/separation = 12
 
-[node name="CountyName" type="Label" parent="UI/Control/InfoPanel/VBoxContainer"]
+[node name="CountyName" type="Label" parent="UI/Control/InfoPanel/VBoxContainer" unique_id=1775943899]
+layout_mode = 2
 text = "Select a County"
 label_settings = SubResource("LabelSettings_1")
 
-[node name="DuchySection" type="HBoxContainer" parent="UI/Control/InfoPanel/VBoxContainer"]
+[node name="DuchySection" type="HBoxContainer" parent="UI/Control/InfoPanel/VBoxContainer" unique_id=1755789090]
+layout_mode = 2
 theme_override_constants/separation = 20
 
-[node name="DuchyLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/DuchySection"]
+[node name="DuchyLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/DuchySection" unique_id=335167015]
+layout_mode = 2
 text = "DUCHY"
 label_settings = SubResource("LabelSettings_2")
 
-[node name="DuchyValue" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/DuchySection"]
+[node name="DuchyValue" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/DuchySection" unique_id=1107158333]
+layout_mode = 2
 text = "—"
 label_settings = SubResource("LabelSettings_3")
 
-[node name="GovernanceSection" type="VBoxContainer" parent="UI/Control/InfoPanel/VBoxContainer"]
+[node name="GovernanceSection" type="VBoxContainer" parent="UI/Control/InfoPanel/VBoxContainer" unique_id=1617986986]
+layout_mode = 2
 theme_override_constants/separation = 8
 
-[node name="GovernanceTitle" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection"]
+[node name="GovernanceTitle" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection" unique_id=447565681]
+layout_mode = 2
 text = "GOVERNANCE"
 label_settings = SubResource("LabelSettings_4")
 
-[node name="EarlHBox" type="HBoxContainer" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection"]
+[node name="EarlHBox" type="HBoxContainer" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection" unique_id=450772806]
+layout_mode = 2
 theme_override_constants/separation = 16
 
-[node name="EarlLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/EarlHBox"]
+[node name="EarlLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/EarlHBox" unique_id=1674444917]
+layout_mode = 2
 text = "Earl"
 label_settings = SubResource("LabelSettings_5")
 
-[node name="EarlValue" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/EarlHBox"]
+[node name="EarlValue" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/EarlHBox" unique_id=900242142]
+layout_mode = 2
 text = "—"
 label_settings = SubResource("LabelSettings_6")
 
-[node name="IncomeHBox" type="HBoxContainer" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection"]
+[node name="IncomeHBox" type="HBoxContainer" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection" unique_id=1272783883]
+layout_mode = 2
 theme_override_constants/separation = 16
 
-[node name="IncomeLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/IncomeHBox"]
+[node name="IncomeLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/IncomeHBox" unique_id=857586692]
+layout_mode = 2
 text = "Income"
 label_settings = SubResource("LabelSettings_7")
 
-[node name="IncomeValue" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/IncomeHBox"]
+[node name="IncomeValue" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/IncomeHBox" unique_id=453257915]
+layout_mode = 2
 text = "— £/yr"
 label_settings = SubResource("LabelSettings_8")
 
-[node name="GarrisonHBox" type="HBoxContainer" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection"]
+[node name="GarrisonHBox" type="HBoxContainer" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection" unique_id=639050078]
+layout_mode = 2
 theme_override_constants/separation = 16
 
-[node name="GarrisonLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/GarrisonHBox"]
+[node name="GarrisonLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/GarrisonHBox" unique_id=1189038080]
+layout_mode = 2
 text = "Garrison"
 label_settings = SubResource("LabelSettings_9")
 
-[node name="GarrisonValue" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/GarrisonHBox"]
+[node name="GarrisonValue" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/GarrisonHBox" unique_id=1652467760]
+layout_mode = 2
 text = "—"
 label_settings = SubResource("LabelSettings_10")
 
-[node name="PopulationHBox" type="HBoxContainer" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection"]
+[node name="PopulationHBox" type="HBoxContainer" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection" unique_id=244394825]
+layout_mode = 2
 theme_override_constants/separation = 16
 
-[node name="PopulationLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/PopulationHBox"]
+[node name="PopulationLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/PopulationHBox" unique_id=1867110509]
+layout_mode = 2
 text = "Population"
 label_settings = SubResource("LabelSettings_11")
 
-[node name="PopulationValue" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/PopulationHBox"]
+[node name="PopulationValue" type="Label" parent="UI/Control/InfoPanel/VBoxContainer/GovernanceSection/PopulationHBox" unique_id=2089627620]
+layout_mode = 2
 text = "—"
 label_settings = SubResource("LabelSettings_12")
 
-[node name="Spacer" type="Control" parent="UI/Control/InfoPanel/VBoxContainer"]
+[node name="Spacer" type="Control" parent="UI/Control/InfoPanel/VBoxContainer" unique_id=840702611]
+layout_mode = 2
 size_flags_vertical = 3
 
-[node name="SaveButton" type="Button" parent="UI/Control/InfoPanel/VBoxContainer"]
+[node name="SaveButton" type="Button" parent="UI/Control/InfoPanel/VBoxContainer" unique_id=1575338710]
+layout_mode = 2
 text = "Save Game"
-
-

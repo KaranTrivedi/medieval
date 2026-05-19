@@ -2,7 +2,7 @@
 # Godot 4 Autoload Singleton — England Political Map
 #
 # SETUP:
-#   1. Copy england_godot.json to res://data/england_godot.json
+#   1. Copy bg_godot.json to res://data/bg_godot.json
 #   2. Project → Project Settings → Autoload → Add this script as "MapData"
 #   3. Access from OTHER scripts: MapData.get_county("yorkshire")
 #
@@ -20,7 +20,7 @@ var adjacency  : Dictionary = {}
 var economy    : Dictionary = {}
 
 var is_loaded  : bool = false
-const DATA_PATH = "res://data/england_godot.json"
+const DATA_PATH = "res://data/bg_godot.json"
 
 # ── SIGNALS ───────────────────────────────────────────────────────────────────
 signal map_loaded
@@ -33,7 +33,7 @@ func _ready() -> void:
 func _load_map() -> void:
 	if not FileAccess.file_exists(DATA_PATH):
 		push_error("MapData: File not found at " + DATA_PATH)
-		push_error("MapData: Run convert_to_godot.py first, then copy england_godot.json to res://data/")
+		push_error("MapData: Run convert_to_godot.py first, then copy bg_godot.json to res://data/")
 		return
 
 	var file = FileAccess.open(DATA_PATH, FileAccess.READ)
@@ -132,11 +132,22 @@ func get_polygons(county_name: String, world_scale: Vector2 = Vector2(1, 1)) -> 
 	var raw_polys: Array = co.get("polygons", [])
 	var result: Array = []
 	for raw_ring in raw_polys:
-		var ring = PackedVector2Array()
-		ring.resize(raw_ring.size())
-		for i in raw_ring.size():
-			ring[i] = Vector2(raw_ring[i][0], raw_ring[i][1]) * world_scale
-		result.append(ring)
+		# Build the scaled ring then sanitise it for Polygon2D consumption:
+		#   1. drop consecutive duplicate points (degenerate edges break the
+		#      triangulator and cause the fill to silently fail)
+		#   2. drop the closing duplicate (Polygon2D auto-closes; an explicit
+		#      last==first vertex is what was making Argyll/Galloway/etc.
+		#      fail to fill while their outlines still drew)
+		var ring := PackedVector2Array()
+		for raw in raw_ring:
+			var p := Vector2(raw[0], raw[1]) * world_scale
+			if ring.size() > 0 and ring[ring.size() - 1].is_equal_approx(p):
+				continue
+			ring.append(p)
+		if ring.size() >= 2 and ring[0].is_equal_approx(ring[ring.size() - 1]):
+			ring.resize(ring.size() - 1)
+		if ring.size() >= 3:
+			result.append(ring)
 	return result
 
 func get_center(county_name: String, world_scale: Vector2 = Vector2(1, 1)) -> Vector2:
@@ -161,16 +172,21 @@ func total_duchy_income(duchy_id: String) -> int:
 
 # ── SCENE BUILDER ─────────────────────────────────────────────────────────────
 func build_county_polygons(parent: Node2D, world_scale: Vector2 = Vector2(4, 4)) -> void:
-	var duchy_colors := {
-		"lancaster":  Color(0.35, 0.07, 0.07, 0.65),
-		"cornwall":   Color(0.05, 0.25, 0.15, 0.65),
-		"gloucester": Color(0.07, 0.11, 0.27, 0.65),
-		"norfolk":    Color(0.29, 0.19, 0.0,  0.65),
-		"chester":    Color(0.23, 0.06, 0.31, 0.65),
-		"march":      Color(0.23, 0.15, 0.0,  0.65),
-		"wales":      Color(0.04, 0.13, 0.06, 0.45),
-		"scotland":   Color(0.04, 0.09, 0.16, 0.45),
-	}
+	# Pull colours directly from MapData.duchies (populated from bg_godot.json)
+	# so adding new duchies in the data file works without touching this code.
+	#
+	# Why fully opaque now: when the fill was 0.65 alpha, low-saturation
+	# duchies (e.g. Lothian gold #4a4a14) blended with the default gray
+	# clear-colour to a near-identical gray, making whole counties read as
+	# "missing land". Once we have a parchment background sprite covering
+	# the bbox, we can drop alpha back to ~0.9 to let it show through.
+	const FILL_ALPHA := 1.0
+	var duchy_colors: Dictionary = {}
+	for did in duchies:
+		var hex := str(duchies[did].get("color", "#666666"))
+		var c := Color.html(hex) if hex.begins_with("#") else Color(0.2, 0.2, 0.2)
+		c.a = FILL_ALPHA
+		duchy_colors[did] = c
 
 	var count := 0
 	for cn in counties:
@@ -189,7 +205,7 @@ func build_county_polygons(parent: Node2D, world_scale: Vector2 = Vector2(4, 4))
 		var poly2d = Polygon2D.new()
 		poly2d.name = cn.replace(" ", "_")
 		poly2d.polygon = largest_ring
-		poly2d.color = duchy_colors.get(co.get("duchy", ""), Color(0.2, 0.2, 0.2, 0.5))
+		poly2d.color = duchy_colors.get(co.get("duchy", ""), Color(0.2, 0.2, 0.2, FILL_ALPHA))
 
 		poly2d.set_meta("county_name", cn)
 		poly2d.set_meta("duchy", co.get("duchy", ""))
@@ -215,3 +231,134 @@ func build_county_polygons(parent: Node2D, world_scale: Vector2 = Vector2(4, 4))
 		count += 1
 
 	print("MapData: Built %d county Polygon2D nodes." % count)
+
+
+# Draw outlines around every county. Adjacent same-duchy counties share the
+# same fill colour, so without borders they read as one blob.
+#
+# We do two passes:
+#   1. THIN county lines (every county, dark brown).
+#   2. THICK duchy lines (only counties that touch a different duchy, slightly
+#      different colour, drawn on TOP of the county lines so duchy boundaries
+#      visually dominate.
+#
+# Note the duchy pass is an approximation: a duchy-edge county gets its WHOLE
+# outline thickened, not just the edge facing the other duchy. To do the
+# precise version we'd union all county polygons per duchy with
+# Geometry2D.merge_polygons and trace the union outline — heavier and only
+# worth it if the approximation reads wrong in playtest.
+#
+# Args:
+#   parent (Node2D): typically the BorderLayer node from CampaignMap.tscn.
+#   world_scale (Vector2): same scale used in build_county_polygons.
+# Returns: void
+func build_county_borders(parent: Node2D, world_scale: Vector2 = Vector2(4, 4)) -> void:
+	const COUNTY_BORDER_COLOR := Color(0.08, 0.05, 0.02, 0.90)
+	const COUNTY_BORDER_WIDTH := 4.0
+	const DUCHY_BORDER_COLOR  := Color(0.02, 0.01, 0.00, 1.00)
+	const DUCHY_BORDER_WIDTH  := 12.0
+	const MIN_RING_PTS := 4
+
+	var county_lines := 0
+	var duchy_lines := 0
+
+	# Pass 1: thin county outlines for every ring of every county.
+	for cn in counties:
+		var polys := get_polygons(cn, world_scale)
+		for ring in polys:
+			if ring.size() < MIN_RING_PTS:
+				continue
+			var line := Line2D.new()
+			line.points = ring
+			line.closed = true
+			line.width = COUNTY_BORDER_WIDTH
+			line.default_color = COUNTY_BORDER_COLOR
+			line.joint_mode = Line2D.LINE_JOINT_ROUND
+			parent.add_child(line)
+			county_lines += 1
+
+	# Pass 2: thicker duchy outlines, only for counties that border a different
+	# duchy. Drawn after the thin pass so they layer on top.
+	for cn in counties:
+		var co: Dictionary = counties[cn]
+		var my_duchy: String = co.get("duchy", "")
+		var on_duchy_edge := false
+		for nb_cn in get_adjacent(cn):
+			if str(counties.get(nb_cn, {}).get("duchy", "")) != my_duchy:
+				on_duchy_edge = true
+				break
+		if not on_duchy_edge:
+			continue
+		var polys := get_polygons(cn, world_scale)
+		for ring in polys:
+			if ring.size() < MIN_RING_PTS:
+				continue
+			var line := Line2D.new()
+			line.points = ring
+			line.closed = true
+			line.width = DUCHY_BORDER_WIDTH
+			line.default_color = DUCHY_BORDER_COLOR
+			line.joint_mode = Line2D.LINE_JOINT_ROUND
+			parent.add_child(line)
+			duchy_lines += 1
+
+	print("MapData: Built %d county borders + %d duchy borders." % [county_lines, duchy_lines])
+
+
+# Place duchy-level and county-level labels in the given LabelLayer. Each
+# label is created once with its zoom-band stored as metadata; CampaignMap
+# toggles visibility based on the camera zoom.
+#
+# Args:
+#   parent (Node2D): typically the LabelLayer node from CampaignMap.tscn.
+#   world_scale (Vector2): same scale as the polygons.
+# Returns: void
+func build_labels(parent: Node2D, world_scale: Vector2 = Vector2(4, 4)) -> void:
+	# County labels: at each county's stored centre.
+	for cn in counties:
+		var co: Dictionary = counties[cn]
+		var c = co.get("center", {"x": 0, "y": 0})
+		var pos := Vector2(c["x"], c["y"]) * world_scale
+		parent.add_child(_make_label(cn, pos, 36, "county"))
+
+	# Duchy labels: at the average of member counties' centres. This is a
+	# rough centroid — fine for label placement. Drawn larger so they read
+	# clearly when zoomed out.
+	var duchy_sums: Dictionary = {}   # duchy_id → {sum: Vector2, n: int}
+	for cn in counties:
+		var co: Dictionary = counties[cn]
+		var did = co.get("duchy", "")
+		if did == "":
+			continue
+		var c = co.get("center", {"x": 0, "y": 0})
+		var pos := Vector2(c["x"], c["y"]) * world_scale
+		var bucket: Dictionary = duchy_sums.get(did, {"sum": Vector2.ZERO, "n": 0})
+		bucket.sum += pos
+		bucket.n += 1
+		duchy_sums[did] = bucket
+
+	for did in duchy_sums:
+		var bucket: Dictionary = duchy_sums[did]
+		var centroid: Vector2 = bucket.sum / float(bucket.n)
+		var name: String = str(duchies.get(did, {}).get("name", did)).to_upper()
+		parent.add_child(_make_label(name, centroid, 64, "duchy"))
+
+	print("MapData: Built %d labels." % parent.get_child_count())
+
+
+# Helper: build one styled Label centred on world_pos, tagged with its zoom band.
+# Centring is approximate (offset by half a guesstimated text width) because
+# Label.size isn't computed until the node enters the tree.
+func _make_label(text: String, world_pos: Vector2, font_size: int, band: String) -> Label:
+	var lbl := Label.new()
+	lbl.text = text
+	lbl.add_theme_font_size_override("font_size", font_size)
+	lbl.add_theme_color_override("font_color", Color(0.95, 0.92, 0.78))
+	lbl.add_theme_color_override("font_outline_color", Color(0.05, 0.03, 0.01, 0.95))
+	lbl.add_theme_constant_override("outline_size", 4)
+	# Approximate centring: half-char-width × text length. Tweakable.
+	var est_half_w: float = font_size * 0.28 * float(text.length())
+	var est_half_h: float = font_size * 0.55
+	lbl.position = world_pos - Vector2(est_half_w, est_half_h)
+	lbl.set_meta("zoom_band", band)
+	return lbl

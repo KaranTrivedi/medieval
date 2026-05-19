@@ -2,7 +2,7 @@
 # Autoload singleton — owns the SQLite-backed mutable game state.
 #
 # DATA SPLIT
-#   res://data/england_godot.json  — IMMUTABLE map geometry/topology (MapData)
+#   res://data/bg_godot.json  — IMMUTABLE map geometry/topology (MapData)
 #   user://current.db              — LIVE working save (auto-resumes)
 #   user://saves/slot*.db          — explicit checkpoints from the Save button
 #
@@ -15,15 +15,28 @@ const SCHEMA_VERSION := 2
 const WORKING_DB := "user://current.db"
 const SAVES_DIR  := "user://saves/"
 
-# Maps duchy id (from england_godot.json) to faction id. The data file only
+# Maps duchy id (from bg_godot.json) to faction id. The data file only
 # carries duchies; factions are a higher-level grouping we control here.
+# Note: Welsh "morgannwg" is held by Norman Marcher lords loyal to England,
+# so it belongs to the English faction at game start despite being on Welsh
+# soil — this matches the historical 1247 setting.
 const FACTIONS_BY_DUCHY := {
+	# English duchies
 	"lancaster":  "england",
 	"chester":    "england",
 	"march":      "england",
 	"gloucester": "england",
 	"norfolk":    "england",
 	"cornwall":   "england",
+	# Welsh duchies
+	"gwynedd":    "wales",
+	"deheubarth": "wales",
+	"morgannwg":  "england",   # Marcher lords swore to the English crown
+	# Scottish duchies
+	"highlands":  "scotland",
+	"moray":      "scotland",
+	"lothian":    "scotland",
+	# Legacy fallbacks for v1 saves predating the subdivision
 	"wales":      "wales",
 	"scotland":   "scotland",
 }

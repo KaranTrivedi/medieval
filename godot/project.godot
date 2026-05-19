@@ -21,6 +21,12 @@ MapData="*uid://txt1u84ajmc0"
 GaussianSystem="*res://scripts/GaussianSystem.gd"
 GameState="*res://scripts/GameState.gd"
 
+[display]
+
+window/size/viewport_width=1920
+window/size/viewport_height=1080
+window/size/mode=2
+
 [physics]
 
 3d/physics_engine="Jolt Physics"
@@ -28,3 +34,4 @@ GameState="*res://scripts/GameState.gd"
 [rendering]
 
 renderer/rendering_method="gl_compatibility"
+viewport/hdr_2d=true
