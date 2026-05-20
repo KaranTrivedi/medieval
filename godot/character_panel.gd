@@ -28,6 +28,7 @@ func _ready() -> void:
 	# Centred, fixed size. The parent .tscn anchors this; we just style + build.
 	custom_minimum_size = Vector2(560, 620)
 	mouse_filter = Control.MOUSE_FILTER_STOP
+	UITheme.style_panel(self)
 
 	# Outer container.
 	vbox = VBoxContainer.new()
@@ -81,6 +82,7 @@ func _rebuild() -> void:
 	_build_offices(ch)
 	_build_holdings(ch)
 	_build_relations(ch)
+	_build_lifecycle(ch)
 	_build_actions(ch)
 	_build_inbox(ch)
 	_build_footer(ch)
@@ -291,6 +293,34 @@ func _build_offices(ch: Dictionary) -> void:
 		lbl.add_theme_font_size_override("font_size", 12)
 		lbl.add_theme_color_override("font_color", Color(0.85, 0.78, 0.55))
 		vbox.add_child(lbl)
+
+
+# Lifecycle events log: birth, coming of age, marriages, widowing, death.
+# Compact one-line-per-event listing in chronological order.
+func _build_lifecycle(ch: Dictionary) -> void:
+	var cid: int = int(ch.get("character_id", 0))
+	if cid <= 0:
+		return
+	var events: Array = GameState.lifecycle_events_of(cid)
+	if events.is_empty():
+		return
+	_section_header("Life events")
+	for e in events:
+		var lbl := Label.new()
+		lbl.text = "  · %d — %s" % [int(e.get("year", 0)), _pretty_event(str(e.get("kind", "")))]
+		lbl.add_theme_font_size_override("font_size", 12)
+		lbl.add_theme_color_override("font_color", UITheme.COL_INK_DIM)
+		vbox.add_child(lbl)
+
+
+func _pretty_event(kind: String) -> String:
+	match kind:
+		"birth":         return "born"
+		"coming_of_age": return "came of age"
+		"marriage":      return "married"
+		"widowed":       return "widowed"
+		"death":         return "died"
+	return kind
 
 
 # Actions the PLAYER character can take against the character currently

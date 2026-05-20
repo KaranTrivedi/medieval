@@ -198,8 +198,146 @@ func advance_turn() -> int:
 		"INSERT INTO turns(turn_number, year, season, active_faction_id, processed_at) VALUES(?,?,?,?,?);",
 		[next, year, season, player_faction_id, Time.get_datetime_string_from_system()]
 	)
+	# Lifecycle tick — fires once per in-game year, on the Spring transition.
+	# Turn 1 is the game-start Spring; we don't age anyone there. Subsequent
+	# Springs (turn 5, 9, 13, …) bump every alive character by one year and
+	# resolve births, comings-of-age, marriages, and deaths.
+	if next > 1 and (next - 1) % 4 == 0:
+		_advance_lifecycle(year)
 	state_changed.emit()
 	return next
+
+
+# ── LIFECYCLE ─────────────────────────────────────────────────────────────────
+# Yearly tick. Ages every alive character by one year, then resolves deaths,
+# comings-of-age, and marriage matches. Called from advance_turn() on the
+# Spring transition (so once per simulated year).
+#
+# Args:
+#   year (int): the new year just rolled into.
+# Returns: void
+func _advance_lifecycle(year: int) -> void:
+	# 1. Age everyone alive.
+	db.query("UPDATE characters SET age = age + 1 WHERE alive = 1;")
+
+	# 2. Coming-of-age events at exactly 16. (We log when they cross the line.)
+	db.query("SELECT id FROM characters WHERE alive = 1 AND age = 16;")
+	for row in db.query_result:
+		_log_lifecycle(int(row["id"]), "coming_of_age", year, {})
+
+	# 3. Deaths. age >= death_age → dead. Logs the event, sets alive=0,
+	#    and notifies the surviving spouse with a "widowed" event.
+	db.query("""
+		SELECT id, given_name FROM characters
+		WHERE alive = 1 AND age >= death_age;""")
+	var dying: Array = []
+	for row in db.query_result:
+		dying.append(int(row["id"]))
+	for cid in dying:
+		_die(cid, year)
+
+	# 4. Marriage matching. Cheap deterministic pairing of eligible singles.
+	_try_match_marriages(year)
+
+
+# Record a death: log the event, flip alive to 0, log "widowed" for spouse(es).
+# Holdings are NOT yet transferred — succession lands as a follow-up phase.
+func _die(cid: int, year: int) -> void:
+	_log_lifecycle(cid, "death", year, {})
+	db.query_with_bindings("UPDATE characters SET alive = 0 WHERE id = ?;", [cid])
+	# Flag the spouse, if any.
+	db.query_with_bindings("""
+		SELECT related_id FROM relationships
+		WHERE character_id = ? AND kind = 'spouse';""", [cid])
+	for row in db.query_result:
+		_log_lifecycle(int(row["related_id"]), "widowed", year, {"of_id": cid})
+
+
+# Walk eligible singles and pair them off. Males 18+; females 16-35. Skips
+# anyone with an existing spouse, anyone deceased, and same-family pairs
+# (no incest). Pairs at most MARRIAGES_PER_YEAR per tick to avoid avalanche.
+const MARRIAGES_PER_YEAR := 25
+func _try_match_marriages(year: int) -> void:
+	var bachelors: Array = _eligible_singles("male", 18, 999)
+	var bachelorettes: Array = _eligible_singles("female", 16, 35)
+	if bachelors.is_empty() or bachelorettes.is_empty():
+		return
+	var paired: int = 0
+	var used_brides: Dictionary = {}
+	for groom in bachelors:
+		if paired >= MARRIAGES_PER_YEAR:
+			return
+		var groom_family_id: int = int(groom.family_id)
+		var groom_age: int = int(groom.age)
+		# Find a bride: different family, age within ±12 years, no other groom
+		# has already taken her this tick.
+		for bride in bachelorettes:
+			var bid: int = int(bride.id)
+			if used_brides.has(bid):
+				continue
+			if int(bride.family_id) == groom_family_id:
+				continue
+			var bride_age: int = int(bride.age)
+			if abs(bride_age - groom_age) > 12:
+				continue
+			# Match.
+			used_brides[bid] = true
+			_marry(int(groom.id), bid, year)
+			paired += 1
+			break
+
+
+# Pull alive, unwed characters of a given gender in an age window.
+# Returns rows with {id, given_name, family_id, age}.
+func _eligible_singles(gender: String, min_age: int, max_age: int) -> Array:
+	db.query_with_bindings("""
+		SELECT c.id, c.given_name, c.family_id, c.age
+		FROM characters c
+		WHERE c.alive = 1 AND c.gender = ? AND c.age >= ? AND c.age <= ?
+		  AND NOT EXISTS (
+			SELECT 1 FROM relationships r
+			WHERE r.character_id = c.id AND r.kind = 'spouse'
+		  )
+		ORDER BY c.age ASC, c.id ASC;""",
+		[gender, min_age, max_age]
+	)
+	var out: Array = []
+	for row in db.query_result:
+		out.append(row.duplicate())
+	return out
+
+
+# Record the marriage edge in both directions + log lifecycle event for both.
+func _marry(groom_id: int, bride_id: int, year: int) -> void:
+	_link_pair(groom_id, bride_id, "spouse")
+	_log_lifecycle(groom_id, "marriage", year, {"spouse_id": bride_id})
+	_log_lifecycle(bride_id, "marriage", year, {"spouse_id": groom_id})
+
+
+func _log_lifecycle(character_id: int, kind: String, year: int, payload: Dictionary) -> void:
+	db.query_with_bindings("""
+		INSERT INTO lifecycle_events(character_id, kind, year, payload_json)
+		VALUES(?,?,?,?);""",
+		[character_id, kind, year, JSON.stringify(payload)]
+	)
+
+
+# Read all lifecycle events for one character, oldest first.
+func lifecycle_events_of(character_id: int) -> Array:
+	db.query_with_bindings("""
+		SELECT kind, year, payload_json FROM lifecycle_events
+		WHERE character_id = ?
+		ORDER BY year ASC, id ASC;""",
+		[character_id]
+	)
+	var out: Array = []
+	for row in db.query_result:
+		out.append({
+			"kind": str(row["kind"]),
+			"year": int(row["year"]),
+			"payload_json": str(row["payload_json"]),
+		})
+	return out
 
 
 func county_state(county_id: String) -> Dictionary:
@@ -780,6 +918,7 @@ func _create_schema() -> void:
 			age INTEGER NOT NULL DEFAULT 30,
 			gender TEXT NOT NULL DEFAULT 'male',
 			alive INTEGER NOT NULL DEFAULT 1,
+			death_age INTEGER NOT NULL DEFAULT 60,
 			martial INTEGER NOT NULL DEFAULT 5,
 			diplomacy INTEGER NOT NULL DEFAULT 5,
 			stewardship INTEGER NOT NULL DEFAULT 5,
@@ -787,6 +926,17 @@ func _create_schema() -> void:
 			piety INTEGER NOT NULL DEFAULT 5,
 			traits_json TEXT NOT NULL DEFAULT '[]'
 		);""")
+	# Per-character life events. Birth/coming-of-age/marriage/death-of-spouse/
+	# death — driven by the yearly lifecycle tick from advance_turn().
+	db.query("""
+		CREATE TABLE IF NOT EXISTS lifecycle_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			character_id INTEGER NOT NULL REFERENCES characters(id),
+			kind TEXT NOT NULL,
+			year INTEGER NOT NULL,
+			payload_json TEXT NOT NULL DEFAULT '{}'
+		);""")
+	db.query("CREATE INDEX IF NOT EXISTS idx_lifecycle_character ON lifecycle_events(character_id);")
 	db.query("""
 		CREATE TABLE IF NOT EXISTS holdings (
 			region_type TEXT NOT NULL,
@@ -914,11 +1064,26 @@ func _insert_character(given: String, family_id: int, title: String, age: int,
 		gender: String = "male", alive: bool = true) -> int:
 	if given.is_empty():
 		given = "Anon"
+	# Death age sampled from N(58, 14) clamped to [30, 90]. Already-dead seed
+	# characters (e.g. a holder's deceased father) get their current age — the
+	# year-tick treats them as already-passed.
+	var death_age: int = age
+	if alive:
+		death_age = int(GaussianSystem.sample_clamped(58.0, 14.0, max(age + 1, 30), 90))
 	db.query_with_bindings(
-		"INSERT INTO characters(given_name, family_id, title, age, gender, alive) VALUES(?,?,?,?,?,?);",
-		[given, family_id, title, max(0, age), gender, 1 if alive else 0]
+		"INSERT INTO characters(given_name, family_id, title, age, gender, alive, death_age) VALUES(?,?,?,?,?,?,?);",
+		[given, family_id, title, max(0, age), gender, 1 if alive else 0, death_age]
 	)
-	return db.get_last_insert_rowid()
+	var cid: int = db.get_last_insert_rowid()
+	# Backfill a birth event so the lifecycle log starts on day one.
+	# Game start is Spring 1247 — every character's birth year = 1247 - age.
+	_log_lifecycle(cid, "birth", 1247 - max(0, age), {})
+	if not alive:
+		# Seed-time deceased characters (a holder's father, usually): they
+		# died sometime before the campaign begins. Place the event one year
+		# before the start so it's older than any subsequent log entry.
+		_log_lifecycle(cid, "death", 1246, {})
+	return cid
 
 
 func _set_holding(region_type: String, region_id: String, character_id: int, family_id: int) -> void:

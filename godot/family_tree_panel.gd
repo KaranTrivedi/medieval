@@ -8,6 +8,8 @@
 
 extends Panel
 
+# UITheme is autoloaded as a global class via `class_name UITheme` in ui_theme.gd.
+
 signal closed
 signal navigate_to(character_id: int)     # alias of clicking the centre name
 
@@ -18,6 +20,7 @@ var _focus_id: int = 0
 func _ready() -> void:
 	custom_minimum_size = Vector2(900, 540)
 	mouse_filter = Control.MOUSE_FILTER_STOP
+	UITheme.style_panel(self)
 
 	_root = VBoxContainer.new()
 	_root.anchor_right = 1.0
@@ -168,30 +171,44 @@ func _row(persons: Array, empty_text: String) -> HBoxContainer:
 
 
 # A single character "chip" — surname-colored card with given name + age,
-# clickable to refocus the tree on that character.
+# clickable to refocus the tree on that character. Deceased characters get
+# a darker fill, dimmer text, and a "✝" prefix on the name line.
 func _chip(other: Dictionary, is_focus: bool) -> Button:
 	var btn := Button.new()
+	var alive: bool = bool(other.get("alive", true))
 	var full: String = (str(other.get("given_name", "")) + " " + str(other.get("surname", ""))).strip_edges()
 	var line2: String = "%s · %d" % [str(other.get("title", "Lord")), int(other.get("age", 0))]
-	if not bool(other.get("alive", true)):
-		full += " †"
+	if not alive:
+		full = "✝  " + full
+		line2 = "deceased · " + line2
 	btn.text = full + "\n" + line2
-	btn.custom_minimum_size = Vector2(160, 56)
+	btn.custom_minimum_size = Vector2(170, 60)
 	btn.add_theme_font_size_override("font_size", 12)
-	btn.add_theme_color_override("font_color",
-			Color(1.0, 0.96, 0.65) if is_focus else Color(0.95, 0.90, 0.72))
-	btn.add_theme_color_override("font_hover_color", Color(1.0, 0.98, 0.55))
-	# Visual cue for focus character: subtle highlight via theme variation.
-	if is_focus:
-		var sb := StyleBoxFlat.new()
+	var ink: Color = UITheme.COL_INK_DEAD if not alive else (UITheme.COL_ACCENT_GOLD if is_focus else UITheme.COL_INK)
+	btn.add_theme_color_override("font_color", ink)
+	btn.add_theme_color_override("font_hover_color", UITheme.COL_BUTTON_HOVER)
+	# Custom stylebox: focus characters get the warm gold border, deceased
+	# characters get a desaturated fill so they read as "past" at a glance.
+	var sb := StyleBoxFlat.new()
+	if not alive:
+		sb.bg_color = Color(0.060, 0.050, 0.040)
+		sb.border_color = Color(0.30, 0.27, 0.23)
+	elif is_focus:
 		sb.bg_color = Color(0.20, 0.16, 0.08)
-		sb.border_width_left = 2; sb.border_width_top = 2
-		sb.border_width_right = 2; sb.border_width_bottom = 2
-		sb.border_color = Color(0.70, 0.55, 0.25)
-		sb.corner_radius_top_left = 3; sb.corner_radius_top_right = 3
-		sb.corner_radius_bottom_left = 3; sb.corner_radius_bottom_right = 3
-		btn.add_theme_stylebox_override("normal", sb)
-		btn.add_theme_stylebox_override("hover", sb)
+		sb.border_color = UITheme.COL_ACCENT_GOLD_DIM
+	else:
+		sb.bg_color = UITheme.COL_PANEL_BG_DEEP
+		sb.border_color = UITheme.COL_PANEL_BORDER
+	var w: int = 2 if is_focus else 1
+	sb.border_width_left = w; sb.border_width_top = w
+	sb.border_width_right = w; sb.border_width_bottom = w
+	sb.corner_radius_top_left = 3; sb.corner_radius_top_right = 3
+	sb.corner_radius_bottom_left = 3; sb.corner_radius_bottom_right = 3
+	sb.content_margin_left = 8; sb.content_margin_right = 8
+	sb.content_margin_top = 6; sb.content_margin_bottom = 6
+	btn.add_theme_stylebox_override("normal", sb)
+	btn.add_theme_stylebox_override("hover", sb)
+	btn.add_theme_stylebox_override("pressed", sb)
 	var cid: int = int(other.get("character_id", 0))
 	btn.pressed.connect(func(): _refocus(cid))
 	return btn

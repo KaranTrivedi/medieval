@@ -81,14 +81,20 @@ func _ready():
 	# Holder-row click in InfoPanel → open Character overview.
 	if ui.has_signal("holder_clicked"):
 		ui.holder_clicked.connect(_on_holder_clicked)
+	# Region "View details" button in InfoPanel → open RegionPanel.
+	if ui.has_signal("region_details_requested"):
+		ui.region_details_requested.connect(_on_region_details_requested)
 	# Character panel navigation buttons.
 	var char_panel: Node = ui.get_node_or_null("Control/CharacterPanel")
 	var tree_panel: Node = ui.get_node_or_null("Control/FamilyTreePanel")
+	var region_panel: Node = ui.get_node_or_null("Control/RegionPanel")
 	if char_panel != null:
 		char_panel.navigate_to.connect(_on_character_navigate)
 		char_panel.open_family_tree.connect(_on_open_family_tree)
 	if tree_panel != null:
 		tree_panel.navigate_to.connect(_on_family_tree_navigate)
+	if region_panel != null:
+		region_panel.open_holder_character.connect(_on_holder_clicked)
 	if MapData.is_loaded:
 		build_map()
 	else:
@@ -126,6 +132,14 @@ func _on_family_tree_navigate(character_id: int) -> void:
 	var p: Node = ui.get_node_or_null("Control/CharacterPanel")
 	if p != null and p.has_method("show_for"):
 		p.show_for(character_id)
+
+
+# "View region details" button in the InfoPanel opens the RegionPanel
+# (Economy / Politics / Subregions tabs) for the currently-selected region.
+func _on_region_details_requested(region_type: String, region_id: String) -> void:
+	var p: Node = ui.get_node_or_null("Control/RegionPanel")
+	if p != null and p.has_method("show_for"):
+		p.show_for(region_type, region_id)
 
 func build_map():
 	print("=== build_map() START ===")
@@ -462,6 +476,8 @@ func _select_country(hit: Dictionary) -> void:
 	var stats: Dictionary = MapData.aggregate_country(_selected_country)
 	stats["type"] = "country"
 	stats["name"] = hit.get("name", "")
+	# RegionPanel keys lookups by lowercase faction id (england/wales/scotland).
+	stats["id"] = _selected_country.to_lower()
 	# Look up the monarch row (country holders are keyed by lowercase faction id).
 	stats["holder"] = GameState.holder_of("country", _selected_country.to_lower())
 	ui.update_panel_typed(stats)
@@ -480,6 +496,7 @@ func _select_duchy(hit: Dictionary) -> void:
 	var stats: Dictionary = MapData.aggregate_duchy(_selected_duchy)
 	stats["type"] = "duchy"
 	stats["name"] = hit.get("name", "")
+	stats["id"] = _selected_duchy
 	stats["holder"] = GameState.holder_of("duchy", _selected_duchy)
 	ui.update_panel_typed(stats)
 

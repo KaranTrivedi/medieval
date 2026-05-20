@@ -39,7 +39,7 @@ This codebase has some genuinely large files (`MapData.gd` ~1000 lines, `GameSta
 Finish every prompt output with the following style of git commit message:
 
 ```
-[Appropriate context named] Update
+Appropriate context named Update
 
 Changelog:
 - Improved hover and select modes.

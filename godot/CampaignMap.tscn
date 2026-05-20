@@ -9,6 +9,7 @@
 [ext_resource type="Script" path="res://cascading_panel.gd" id="7_cascading"]
 [ext_resource type="Script" path="res://character_panel.gd" id="8_charpanel"]
 [ext_resource type="Script" path="res://family_tree_panel.gd" id="9_ftpanel"]
+[ext_resource type="Script" path="res://region_panel.gd" id="10_regionpanel"]
 
 [sub_resource type="LabelSettings" id="LabelSettings_4"]
 
@@ -211,3 +212,17 @@ offset_top = -270.0
 offset_right = 450.0
 offset_bottom = 270.0
 script = ExtResource("9_ftpanel")
+
+[node name="RegionPanel" type="Panel" parent="UI/Control"]
+theme_override_styles/panel = SubResource("StyleBoxFlat_OpaquePanel")
+visible = false
+layout_mode = 0
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -360.0
+offset_top = -270.0
+offset_right = 360.0
+offset_bottom = 270.0
+script = ExtResource("10_regionpanel")

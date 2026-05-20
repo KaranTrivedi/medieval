@@ -15,6 +15,12 @@ extends CanvasLayer
 # character_id so they can open the character overview.
 signal holder_clicked(character_id: int)
 
+# Emitted when the "Details" button at the bottom of the InfoPanel is clicked.
+# Carries the (region_type, region_id) so CampaignMap can open RegionPanel.
+signal region_details_requested(region_type: String, region_id: String)
+
+const UITheme := preload("res://ui_theme.gd")
+
 # Big colour values for headers per region tier — gives each tier a distinct
 # visual identity in the panel header.
 const HEADER_COLORS := {
@@ -61,6 +67,7 @@ func _build_country(d: Dictionary) -> void:
 	_add_kv("Total income",  "%s £/yr" % _fmt_thousands(int(d.get("total_income", 0))))
 	_add_kv("Population",    _fmt_thousands(int(d.get("population", 0))))
 	_add_kv("Garrison",      "%s troops" % _fmt_thousands(int(d.get("garrison", 0))))
+	_add_details_button("country", str(d.get("id", str(d.get("name", "")).to_lower())))
 
 
 func _build_duchy(d: Dictionary) -> void:
@@ -71,6 +78,7 @@ func _build_duchy(d: Dictionary) -> void:
 	_add_kv("Total income",  "%s £/yr" % _fmt_thousands(int(d.get("total_income", 0))))
 	_add_kv("Population",    _fmt_thousands(int(d.get("population", 0))))
 	_add_kv("Garrison",      "%s troops" % _fmt_thousands(int(d.get("garrison", 0))))
+	_add_details_button("duchy", str(d.get("id", "")))
 
 
 func _build_county(d: Dictionary) -> void:
@@ -81,6 +89,7 @@ func _build_county(d: Dictionary) -> void:
 	_add_kv("Income",        "%s £/yr" % _fmt_thousands(int(d.get("income", 0))))
 	_add_kv("Population",    _fmt_thousands(int(d.get("population", 0))))
 	_add_kv("Garrison",      "%s troops" % _fmt_thousands(int(d.get("garrison", 0))))
+	_add_details_button("county", str(d.get("name", "")))
 
 
 func _build_barony(d: Dictionary) -> void:
@@ -90,6 +99,23 @@ func _build_barony(d: Dictionary) -> void:
 	_add_kv("Income",        "%s £/yr" % _fmt_thousands(int(d.get("income", 0))))
 	_add_kv("Population",    _fmt_thousands(int(d.get("population", 0))))
 	_add_kv("Garrison",      "%s troops" % _fmt_thousands(int(d.get("garrison", 0))))
+	_add_details_button("barony", str(d.get("id", "")))
+
+
+# A footer button that opens RegionPanel (Economy/Politics/Subregions tabs)
+# for the region currently being displayed. The button is suppressed when no
+# region_id can be derived (shouldn't happen — every tier passes one).
+func _add_details_button(region_type: String, region_id: String) -> void:
+	if region_id == "":
+		return
+	# Spacer separating the kv rows from the action button.
+	var spacer := Control.new()
+	spacer.custom_minimum_size = Vector2(0, 6)
+	vbox.add_child(spacer)
+	var btn := UITheme.styled_button("📜  View region details")
+	btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	btn.pressed.connect(func(): region_details_requested.emit(region_type, region_id))
+	vbox.add_child(btn)
 
 
 # Render the current holder + house, plus the holder's age. The holder name
