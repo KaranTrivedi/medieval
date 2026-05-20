@@ -675,11 +675,9 @@ Need a table showing all baronaries , counties etc. in a cascading table. two ta
 Is there any way I can traverse the sqlite databases? I would like to be able the view the entries and tables etc.Also I added a sprite2D layer, I would like it to fit the background correctly. we can deal with that later if its too complicated.
 
 **Out of scope for Phase 1:**
-- Castles and siege engines
 - Family trees and bastards
 - Full Chronicle / Bard system
 - Intrigue and fog of knowledge
-- Real-time battles
 
 ### Phase 2 — Political Depth
 
@@ -701,6 +699,8 @@ Is there any way I can traverse the sqlite databases? I would like to be able th
 ### Phase 3 — Military Layer
 
 **Deliverables:**
+- Real-time battles
+- Castles and siege engines
 - UE5 real-time battle integration
 - Mass Entity unit simulation (10,000+ agents)
 - Formation AI and morale system

@@ -11,7 +11,7 @@
 
 extends Node
 
-const SCHEMA_VERSION := 2
+const SCHEMA_VERSION := 3
 const WORKING_DB := "user://current.db"
 const SAVES_DIR  := "user://saves/"
 
@@ -405,15 +405,61 @@ func _migrate() -> void:
 		);""")
 	db.query("CREATE INDEX IF NOT EXISTS idx_counties_owner ON counties_state(owner_faction_id);")
 
+	# v3 — political layer: families, characters, holdings. Lord/earl/baron
+	# strings from DesignData are parsed into Family + Character at seed
+	# time; holdings link each region to its current head-of-family.
+	db.query("""
+		CREATE TABLE IF NOT EXISTS families (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			surname TEXT NOT NULL UNIQUE,
+			prestige INTEGER NOT NULL DEFAULT 50,
+			founder_turn INTEGER NOT NULL DEFAULT 0,
+			notes TEXT
+		);""")
+	db.query("""
+		CREATE TABLE IF NOT EXISTS characters (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			given_name TEXT NOT NULL,
+			family_id INTEGER REFERENCES families(id),
+			title TEXT,
+			age INTEGER NOT NULL DEFAULT 30,
+			gender TEXT NOT NULL DEFAULT 'male',
+			alive INTEGER NOT NULL DEFAULT 1,
+			martial INTEGER NOT NULL DEFAULT 5,
+			diplomacy INTEGER NOT NULL DEFAULT 5,
+			stewardship INTEGER NOT NULL DEFAULT 5,
+			intrigue INTEGER NOT NULL DEFAULT 5,
+			piety INTEGER NOT NULL DEFAULT 5,
+			traits_json TEXT NOT NULL DEFAULT '[]'
+		);""")
+	db.query("""
+		CREATE TABLE IF NOT EXISTS holdings (
+			region_type TEXT NOT NULL,
+			region_id TEXT NOT NULL,
+			holder_character_id INTEGER REFERENCES characters(id),
+			holder_family_id INTEGER REFERENCES families(id),
+			updated_turn INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (region_type, region_id)
+		);""")
+	db.query("CREATE INDEX IF NOT EXISTS idx_characters_family ON characters(family_id);")
+	db.query("CREATE INDEX IF NOT EXISTS idx_holdings_holder ON holdings(holder_character_id);")
+
 	# Version-gated patches for older DBs.
 	var prev_version: int = _read_schema_version()
 	if prev_version < 2:
 		_migrate_to_v2()
+	if prev_version < 3:
+		_migrate_to_v3()
 
 	db.query_with_bindings(
 		"INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?);",
 		[str(SCHEMA_VERSION)]
 	)
+
+	# Heal-on-resume: an earlier v3 migration created the tables but didn't
+	# seed (the first _migrate_to_v3 was a pass). Re-running here back-fills
+	# those DBs; idempotent via _seed_political's holdings-count guard.
+	_seed_political()
 
 
 # Read the stored schema_version. Returns 0 if meta is absent or empty (which
@@ -449,6 +495,14 @@ func _migrate_to_v2() -> void:
 				"INSERT OR IGNORE INTO harvest_params(season, mean, std_dev, min_val, max_val, description) VALUES(?,?,?,?,?,?);",
 				[p.season, p.mean, p.std_dev, p.min_val, p.max_val, p.description]
 			)
+
+
+# v2 → v3 upgrade. Tables already created by the CREATE TABLE IF NOT EXISTS
+# block above; this step seeds the political layer for saves that came up
+# from v2 without ever hitting new_game() (the seed normally runs there).
+# _seed_political() is idempotent — it early-returns if holdings is non-empty.
+func _migrate_to_v3() -> void:
+	_seed_political()
 
 
 # Populate factions + counties_state from MapData. INSERT OR IGNORE makes this
@@ -497,5 +551,145 @@ func _seed() -> void:
 			[fertility, cname]
 		)
 
+	# Political layer (v3): families, characters, holdings. Run once per
+	# fresh game — INSERT OR IGNORE keeps it safe on reseed.
+	_seed_political()
+
 	if current_turn() == 0:
 		advance_turn()
+
+
+# Split a lord/earl/baron string from the design layer into (given, surname).
+# Heuristics (best-effort — design strings vary):
+#   "John de Lacy"         → ("John", "de Lacy")
+#   "FitzAlan"             → ("",     "FitzAlan")     (only surname)
+#   "Crown Direct"         → ("Crown","Direct")       (placeholder)
+#   "Wm. de Beauchamp"     → ("Wm.",  "de Beauchamp")
+#   "Llywelyn ap Gruffudd" → ("Llywelyn", "ap Gruffudd")
+#   "Prince-Bishop"        → ("",     "Prince-Bishop") (titular)
+# Strings containing parenthetical asides have those stripped first.
+func _parse_lord_name(s: String) -> Dictionary:
+	var t: String = s.strip_edges()
+	# Strip "( ... )" trailing context like "Crown Direct (London)".
+	var paren := t.find("(")
+	if paren > 0:
+		t = t.substr(0, paren).strip_edges()
+	if t == "":
+		return {"given": "", "surname": "Unknown"}
+	var parts: PackedStringArray = t.split(" ", false)
+	if parts.size() == 1:
+		return {"given": "", "surname": parts[0]}
+	# Otherwise: first token = given, the rest = surname.
+	return {"given": parts[0], "surname": " ".join(parts.slice(1))}
+
+
+# Get-or-create a family row by surname. Returns the family id.
+func _ensure_family(surname: String) -> int:
+	if surname == "":
+		surname = "Unknown"
+	db.query_with_bindings("SELECT id FROM families WHERE surname = ?;", [surname])
+	if not db.query_result.is_empty():
+		return int(db.query_result[0]["id"])
+	db.query_with_bindings(
+		"INSERT INTO families(surname, prestige, founder_turn) VALUES(?,?,?);",
+		[surname, 50, 0]
+	)
+	return db.get_last_insert_rowid()
+
+
+# Insert a character + return its id. Stats default to 5 (median 1..10).
+# Designer can override later via DesignData hand-edits.
+func _insert_character(given: String, family_id: int, title: String, age: int) -> int:
+	db.query_with_bindings(
+		"INSERT INTO characters(given_name, family_id, title, age) VALUES(?,?,?,?);",
+		[given if given != "" else "Lord", family_id, title, max(18, age)]
+	)
+	return db.get_last_insert_rowid()
+
+
+# Upsert a holding row linking a region to its current head-of-family.
+func _set_holding(region_type: String, region_id: String, character_id: int, family_id: int) -> void:
+	db.query_with_bindings(
+		"INSERT OR REPLACE INTO holdings(region_type, region_id, holder_character_id, holder_family_id, updated_turn) VALUES(?,?,?,?,?);",
+		[region_type, region_id, character_id, family_id, 0]
+	)
+
+
+# Build the political layer from DesignData strings + monarchs + per-LAD
+# barony holders. Runs once on first new game; INSERT OR IGNORE / OR REPLACE
+# semantics make it safe to re-run.
+func _seed_political() -> void:
+	if not DesignData.loaded:
+		push_warning("GameState._seed_political: DesignData not loaded yet")
+		return
+	# Skip if we've already seeded (any holdings row exists).
+	db.query("SELECT COUNT(*) AS c FROM holdings;")
+	if int(db.query_result[0]["c"]) > 0:
+		return
+
+	# COUNTRIES — monarch per faction.
+	for country in ["england", "wales", "scotland"]:
+		var m: Dictionary = DesignData.monarchs.get(country, {})
+		var sn: String = str(m.get("surname", country.capitalize()))
+		var gn: String = str(m.get("given", ""))
+		var fid: int = _ensure_family(sn)
+		var cid: int = _insert_character(gn, fid, str(m.get("title", "Monarch")),
+				int(m.get("age", 35)))
+		_set_holding("country", country, cid, fid)
+
+	# DUCHIES — each has a `lord` field in DesignData.duchies.
+	for did in DesignData.duchies:
+		var lord_str: String = str(DesignData.duchies[did].get("lord", ""))
+		var parsed: Dictionary = _parse_lord_name(lord_str)
+		var fid := _ensure_family(parsed.surname)
+		var cid := _insert_character(parsed.given, fid, "Duke", 40)
+		_set_holding("duchy", did, cid, fid)
+
+	# COUNTIES — `earl` field in DesignData.counties.
+	for cn in DesignData.counties:
+		var earl_str: String = str(DesignData.counties[cn].get("earl", ""))
+		var parsed: Dictionary = _parse_lord_name(earl_str)
+		var fid := _ensure_family(parsed.surname)
+		var cid := _insert_character(parsed.given, fid, "Earl", 35)
+		_set_holding("county", cn, cid, fid)
+
+	# BARONIES — every LAD got a deterministic baron entry from extract_design.py.
+	for lad in DesignData.barony_holders:
+		var h: Dictionary = DesignData.barony_holders[lad]
+		var fid := _ensure_family(str(h.get("surname", "of " + lad)))
+		var cid := _insert_character(str(h.get("given", "")), fid,
+				str(h.get("title", "Baron")), int(h.get("age", 30)))
+		_set_holding("barony", lad, cid, fid)
+
+	print("GameState: seeded political layer — %d holdings" % _count_holdings())
+
+
+func _count_holdings() -> int:
+	db.query("SELECT COUNT(*) AS c FROM holdings;")
+	if db.query_result.is_empty():
+		return 0
+	return int(db.query_result[0]["c"])
+
+
+# Public: look up the head-of-family currently holding a region.
+#
+# Args:
+#   region_type (String): "country" | "duchy" | "county" | "barony".
+#   region_id (String): country id, duchy id, county name, or LAD13CD.
+# Returns:
+#   Dictionary: {given_name, surname, title, age, character_id, family_id,
+#                prestige} or {} if no holder is recorded.
+func holder_of(region_type: String, region_id: String) -> Dictionary:
+	db.query_with_bindings("""
+		SELECT c.id AS character_id, c.given_name, c.title, c.age,
+		       f.id AS family_id, f.surname, f.prestige
+		FROM holdings h
+		JOIN characters c ON c.id = h.holder_character_id
+		JOIN families   f ON f.id = h.holder_family_id
+		WHERE h.region_type = ? AND h.region_id = ?
+		LIMIT 1;""",
+		[region_type, region_id]
+	)
+	if db.query_result.is_empty():
+		return {}
+	return db.query_result[0].duplicate()

@@ -48,6 +48,7 @@ func update_panel_typed(data: Dictionary) -> void:
 
 func _build_country(d: Dictionary) -> void:
 	_add_header(d.get("name", ""), "country", "Country")
+	_add_holder_row(d.get("holder", {}))
 	_add_kv("Duchies",       str(int(d.get("duchy_count", 0))))
 	_add_kv("Counties",      str(int(d.get("county_count", 0))))
 	_add_kv("Baronies",      str(int(d.get("barony_count", 0))))
@@ -58,7 +59,7 @@ func _build_country(d: Dictionary) -> void:
 
 func _build_duchy(d: Dictionary) -> void:
 	_add_header(d.get("name", ""), "duchy", "Duchy")
-	_add_kv("Lord",          str(d.get("lord", "—")))
+	_add_holder_row(d.get("holder", {}))
 	_add_kv("Counties",      str(int(d.get("county_count", 0))))
 	_add_kv("Baronies",      str(int(d.get("barony_count", 0))))
 	_add_kv("Total income",  "%s £/yr" % _fmt_thousands(int(d.get("total_income", 0))))
@@ -68,8 +69,8 @@ func _build_duchy(d: Dictionary) -> void:
 
 func _build_county(d: Dictionary) -> void:
 	_add_header(d.get("name", ""), "county", "County")
+	_add_holder_row(d.get("holder", {}))
 	_add_kv("Duchy",         str(d.get("duchy", "—")).capitalize())
-	_add_kv("Earl",          str(d.get("earl", "—")))
 	_add_kv("Baronies",      str(int(d.get("baronies", []).size())))
 	_add_kv("Income",        "%s £/yr" % _fmt_thousands(int(d.get("income", 0))))
 	_add_kv("Population",    _fmt_thousands(int(d.get("population", 0))))
@@ -78,10 +79,30 @@ func _build_county(d: Dictionary) -> void:
 
 func _build_barony(d: Dictionary) -> void:
 	_add_header(d.get("name", ""), "barony", "Barony")
+	_add_holder_row(d.get("holder", {}))
 	_add_kv("County",        str(d.get("county", "—")))
 	_add_kv("Income",        "%s £/yr" % _fmt_thousands(int(d.get("income", 0))))
 	_add_kv("Population",    _fmt_thousands(int(d.get("population", 0))))
 	_add_kv("Garrison",      "%s troops" % _fmt_thousands(int(d.get("garrison", 0))))
+
+
+# Render the current holder + house, plus the holder's age. Skips if the
+# holder dict is empty (e.g. v2 saves loaded under a v3 schema before the
+# political seed has run).
+func _add_holder_row(h: Dictionary) -> void:
+	if h.is_empty():
+		return
+	var title: String = str(h.get("title", "Holder"))
+	var given: String = str(h.get("given_name", "")).strip_edges()
+	var surname: String = str(h.get("surname", "")).strip_edges()
+	var full_name: String = (given + " " + surname).strip_edges()
+	if full_name == "":
+		full_name = "Unknown"
+	_add_kv(title, full_name)
+	if surname != "":
+		_add_kv("House", surname)
+	if int(h.get("age", 0)) > 0:
+		_add_kv("Age", str(int(h.get("age"))))
 
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────

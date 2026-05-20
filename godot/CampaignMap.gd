@@ -420,6 +420,8 @@ func _select_country(hit: Dictionary) -> void:
 	var stats: Dictionary = MapData.aggregate_country(_selected_country)
 	stats["type"] = "country"
 	stats["name"] = hit.get("name", "")
+	# Look up the monarch row (country holders are keyed by lowercase faction id).
+	stats["holder"] = GameState.holder_of("country", _selected_country.to_lower())
 	ui.update_panel_typed(stats)
 
 
@@ -438,6 +440,7 @@ func _select_duchy(hit: Dictionary) -> void:
 	stats["type"] = "duchy"
 	stats["name"] = hit.get("name", "")
 	stats["lord"] = lord
+	stats["holder"] = GameState.holder_of("duchy", _selected_duchy)
 	ui.update_panel_typed(stats)
 
 
@@ -478,6 +481,7 @@ func _select_barony(hit: Dictionary) -> void:
 	stats["name"] = hit.get("name", "")
 	stats["county"] = parent_county
 	stats["id"] = _selected_barony
+	stats["holder"] = GameState.holder_of("barony", _selected_barony)
 	ui.update_panel_typed(stats)
 
 
@@ -580,6 +584,7 @@ func _select_county(county_name: String) -> void:
 	var data: Dictionary = MapData.get_county(county_name).duplicate()
 	data["type"] = "county"
 	data["name"] = county_name
+	data["holder"] = GameState.holder_of("county", county_name)
 	ui.update_panel_typed(data)
 
 
