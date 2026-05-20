@@ -78,12 +78,53 @@ func _ready():
 	# Listen for slider-driven settings changes so labels + borders re-snap
 	# to the new thresholds without needing a manual refresh.
 	MapSettings.changed.connect(_on_map_settings_changed)
+	# Holder-row click in InfoPanel → open Character overview.
+	if ui.has_signal("holder_clicked"):
+		ui.holder_clicked.connect(_on_holder_clicked)
+	# Character panel navigation buttons.
+	var char_panel: Node = ui.get_node_or_null("Control/CharacterPanel")
+	var tree_panel: Node = ui.get_node_or_null("Control/FamilyTreePanel")
+	if char_panel != null:
+		char_panel.navigate_to.connect(_on_character_navigate)
+		char_panel.open_family_tree.connect(_on_open_family_tree)
+	if tree_panel != null:
+		tree_panel.navigate_to.connect(_on_family_tree_navigate)
 	if MapData.is_loaded:
 		build_map()
 	else:
 		print("MapData not loaded yet — waiting for map_loaded signal")
 		MapData.map_loaded.connect(build_map, CONNECT_ONE_SHOT)
 	print("=== _ready() END ===")
+
+
+# When the user clicks the holder name in the InfoPanel, open the character
+# overview centred on the screen.
+func _on_holder_clicked(character_id: int) -> void:
+	var p: Node = ui.get_node_or_null("Control/CharacterPanel")
+	if p != null and p.has_method("show_for"):
+		p.show_for(character_id)
+
+
+# Clicking a relation row in the character panel rebuilds the same panel
+# focused on the new character (so you can walk the family without juggling
+# windows).
+func _on_character_navigate(character_id: int) -> void:
+	_on_holder_clicked(character_id)
+
+
+# Family-tree button in the character panel.
+func _on_open_family_tree(character_id: int) -> void:
+	var p: Node = ui.get_node_or_null("Control/FamilyTreePanel")
+	if p != null and p.has_method("show_for"):
+		p.show_for(character_id)
+
+
+# Clicking a chip in the family tree should also update the character panel
+# behind it so they stay in sync.
+func _on_family_tree_navigate(character_id: int) -> void:
+	var p: Node = ui.get_node_or_null("Control/CharacterPanel")
+	if p != null and p.has_method("show_for") and p.visible:
+		p.show_for(character_id)
 
 func build_map():
 	print("=== build_map() START ===")
@@ -435,11 +476,9 @@ func _select_duchy(hit: Dictionary) -> void:
 	for cn in MapData.counties:
 		if str(MapData.counties[cn].get("duchy", "")) == _selected_duchy:
 			_tint_county(cn, SELECTED_TINT)
-	var lord: String = str(MapData.duchies.get(_selected_duchy, {}).get("lord", ""))
 	var stats: Dictionary = MapData.aggregate_duchy(_selected_duchy)
 	stats["type"] = "duchy"
 	stats["name"] = hit.get("name", "")
-	stats["lord"] = lord
 	stats["holder"] = GameState.holder_of("duchy", _selected_duchy)
 	ui.update_panel_typed(stats)
 

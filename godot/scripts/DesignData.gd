@@ -12,16 +12,17 @@ extends Node
 const PATH := "res://data/gb_design.json"
 
 # Top-level sections of gb_design.json, all exposed as plain dicts/arrays.
-var counties: Dictionary = {}              # county_id  → {earl}  (NO economy)
-var duchies:  Dictionary = {}              # duchy_id   → {name, color, lord}
+var counties: Dictionary = {}              # county_id  → {earl: {given, surname}}
+var duchies:  Dictionary = {}              # duchy_id   → {name, color, lord: {given, surname}}
 var baronies: Dictionary = {}              # LAD13CD    → {income, garrison, population, name?}
-var monarchs: Dictionary = {}              # faction_id → {given, surname, title, age}
-var barony_holders: Dictionary = {}        # LAD13CD    → {given, surname, title, age}
+var monarchs: Dictionary = {}              # faction_id → {given, surname, title, age, gender}
+var barony_holders: Dictionary = {}        # LAD13CD    → {given, surname, title, age, gender}
 var fertility_by_duchy: Dictionary = {}
 var default_harvest_params: Array = []
 var faction_seed: Array = []
 var country_by_duchy: Dictionary = {}
 var factions_by_duchy: Dictionary = {}
+var name_pools: Dictionary = {}            # {male, female, surnames} keyed by E/W/S
 
 var loaded: bool = false
 
@@ -52,6 +53,7 @@ func _load() -> void:
 	faction_seed           = d.get("faction_seed", [])
 	country_by_duchy       = d.get("country_by_duchy", {})
 	factions_by_duchy      = d.get("factions_by_duchy", {})
+	name_pools             = d.get("name_pools", {})
 	loaded = true
 	print("DesignData: loaded %d counties, %d duchies, %d baronies, %d monarchs, %d barony holders" % [
 		counties.size(), duchies.size(), baronies.size(),

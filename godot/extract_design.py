@@ -32,19 +32,20 @@ INPUT_GEOMETRY = os.path.join(SCRIPT_DIR, "data", "gb_godot.json")
 OUTPUT_PATH = os.path.join(SCRIPT_DIR, "data", "gb_design.json")
 
 # ── DUCHIES — display name, heraldic colour, current lord ────────────────────
+# Each `lord` authored as {given, surname} so seeding doesn't have to parse.
 DUCHY_DESIGN = {
-    'lancaster':   {'name':'Duchy of Lancaster','color':'#5a1212','lord':'Richard of Cornwall'},
-    'chester':     {'name':'Earldom of Chester','color':'#3a1050','lord':'John de Lacy'},
-    'march':       {'name':'Welsh Marches','color':'#3a2800','lord':'Wm. de Cantilupe'},
-    'gloucester':  {'name':'Duchy of Gloucester','color':'#122a60','lord':'Roger Bigod'},
-    'norfolk':     {'name':'Earldom of Norfolk','color':'#4a3200','lord':'Hugh Bigod'},
-    'cornwall':    {'name':'Duchy of Cornwall','color':'#0e4028','lord':'Richard de Clare'},
-    'gwynedd':     {'name':'Kingdom of Gwynedd','color':'#1f5024','lord':'Llywelyn ap Gruffudd'},
-    'deheubarth':  {'name':'Kingdom of Deheubarth','color':'#2e6024','lord':'Maredudd ap Owain'},
-    'morgannwg':   {'name':'Lordship of Morgannwg','color':'#5a3818','lord':'Richard de Clare'},
-    'highlands':   {'name':'Earldom of Ross & Isles','color':'#244266','lord':'William, Earl of Ross'},
-    'moray':       {'name':'Earldom of Moray','color':'#1a3a5a','lord':'Alexander Comyn'},
-    'lothian':     {'name':'Crown Lands of Lothian','color':'#4a4a14','lord':'Alexander II'},
+    'lancaster':  {'name':'Duchy of Lancaster','color':'#5a1212','lord':{'given':'Richard',   'surname':'Plantagenet'}},
+    'chester':    {'name':'Earldom of Chester','color':'#3a1050','lord':{'given':'John',      'surname':'de Lacy'}},
+    'march':      {'name':'Welsh Marches','color':'#3a2800','lord':{'given':'William',   'surname':'de Cantilupe'}},
+    'gloucester': {'name':'Duchy of Gloucester','color':'#122a60','lord':{'given':'Roger',     'surname':'Bigod'}},
+    'norfolk':    {'name':'Earldom of Norfolk','color':'#4a3200','lord':{'given':'Hugh',      'surname':'Bigod'}},
+    'cornwall':   {'name':'Duchy of Cornwall','color':'#0e4028','lord':{'given':'Richard',   'surname':'de Clare'}},
+    'gwynedd':    {'name':'Kingdom of Gwynedd','color':'#1f5024','lord':{'given':'Llywelyn',  'surname':'ap Gruffudd'}},
+    'deheubarth': {'name':'Kingdom of Deheubarth','color':'#2e6024','lord':{'given':'Maredudd',  'surname':'ap Owain'}},
+    'morgannwg':  {'name':'Lordship of Morgannwg','color':'#5a3818','lord':{'given':'Richard',   'surname':'de Clare'}},
+    'highlands':  {'name':'Earldom of Ross & Isles','color':'#244266','lord':{'given':'William',   'surname':'of Ross'}},
+    'moray':      {'name':'Earldom of Moray','color':'#1a3a5a','lord':{'given':'Alexander', 'surname':'Comyn'}},
+    'lothian':    {'name':'Crown Lands of Lothian','color':'#4a4a14','lord':{'given':'Alexander', 'surname':'Dunkeld'}},
 }
 
 # ── COUNTIES — earl ONLY ─────────────────────────────────────────────────────
@@ -52,62 +53,65 @@ DUCHY_DESIGN = {
 # get computed up from the baronies at runtime. See COUNTY_BASELINE below
 # for the designer-friendly "target total" knobs that drive the per-barony
 # distribution.
+# Each earl is authored as a {given, surname} pair so seeding doesn't have to
+# guess. Where the 1247 holder was the Crown or a non-secular figure, we still
+# give a concrete person — placeholder titles like "Crown Direct" were a mess.
 COUNTY_DESIGN = {
-    'Northumberland': {'earl':'Henry de Percy'},
-    'Durham':         {'earl':'Prince-Bishop'},
-    'Cumberland':     {'earl':'Ranulf de Dacre'},
-    'Westmorland':    {'earl':'Robert de Clifford'},
-    'Lancashire':     {'earl':'Thomas de Lancaster'},
-    'Yorkshire':      {'earl':'Robert de Percy'},
-    'Cheshire':       {'earl':'John de Lacy'},
-    'Derbyshire':     {'earl':'Wm. de Ferrers'},
-    'Nottinghamshire':{'earl':'Roger de Mortimer'},
-    'Lincolnshire':   {'earl':'Ranulf de Blondeville'},
-    'Staffordshire':  {'earl':'Robert de Stafford'},
-    'Leicestershire': {'earl':'Simon de Montfort'},
-    'Shropshire':     {'earl':'FitzAlan'},
-    'Herefordshire':  {'earl':'Humphrey de Bohun'},
-    'Worcestershire': {'earl':'Wm. de Beauchamp'},
-    'Warwickshire':   {'earl':'Henry de Hastings'},
-    'Gloucestershire':{'earl':'Richard de Clare'},
-    'Oxfordshire':    {'earl':'Roger de Vere'},
-    'Buckinghamshire':{'earl':'Walter Giffard'},
-    'Northamptonshire':{'earl':'Saher de Quincy'},
-    'Bedfordshire':   {'earl':'Roger de Beauchamp'},
-    'Norfolk':        {'earl':'Roger Bigod'},
-    'Suffolk':        {'earl':'Hugh Bigod'},
-    'Essex':          {'earl':'Geoff. de Mandeville'},
-    'Cambridgeshire': {'earl':'John de Burgh'},
-    'Hertfordshire':  {'earl':'Roger de Tony'},
-    'Middlesex':      {'earl':'Crown Direct (London)'},
-    'Kent':           {'earl':'Hubert de Burgh'},
-    'Surrey':         {'earl':'John de Warenne'},
-    'Sussex':         {'earl':'John de Braose'},
-    'Berkshire':      {'earl':'Crown Direct'},
-    'Hampshire':      {'earl':'Baldwin de Reviers'},
-    'Wiltshire':      {'earl':'Patrick de Chaworth'},
-    'Dorset':         {'earl':'Wm. de Mandeville'},
-    'Somerset':       {'earl':'Roger de Clifford'},
-    'Devon':          {'earl':'Hugh de Courtenay'},
-    'Cornwall':       {'earl':'Richard of Cornwall'},
-    'Gwynedd':        {'earl':'Llywelyn ap Gruffudd'},
-    'Perfeddwlad':    {'earl':'Dafydd ap Gruffudd'},
-    'Powys':          {'earl':'Gruffudd Maelor'},
-    'Ceredigion':     {'earl':'Maredudd ap Owain'},
-    'Dyfed':          {'earl':'Rhys ap Maredudd'},
-    'Gower':          {'earl':'John de Mowbray'},
-    'Glamorgan':      {'earl':'Richard de Clare'},
-    'Gwent':          {'earl':'Humphrey de Bohun'},
-    'Highland':       {'earl':'William, Earl of Ross'},
-    'Argyll':         {'earl':'Eóghan of Lorn'},
-    'Orkney':         {'earl':'Magnus, Jarl of Orkney'},
-    'Moray':          {'earl':'Alexander Comyn'},
-    'Strathearn':     {'earl':'Malise II of Strathearn'},
-    'Fife':           {'earl':'Malcolm, Earl of Fife'},
-    'Lothian':        {'earl':'Crown Direct (Alexander II)'},
-    'Borders':        {'earl':'Walter Comyn'},
-    'Strathclyde':    {'earl':'Maldouen, Earl of Lennox'},
-    'Galloway':       {'earl':'Dervorguilla of Galloway'},
+    'Northumberland':  {'earl': {'given': 'Henry',     'surname': 'de Percy'}},
+    'Durham':          {'earl': {'given': 'Walter',    'surname': 'Kirkham'}},        # Prince-Bishop
+    'Cumberland':      {'earl': {'given': 'Ranulf',    'surname': 'de Dacre'}},
+    'Westmorland':     {'earl': {'given': 'Robert',    'surname': 'de Clifford'}},
+    'Lancashire':      {'earl': {'given': 'Thomas',    'surname': 'de Lancaster'}},
+    'Yorkshire':       {'earl': {'given': 'Robert',    'surname': 'de Percy'}},
+    'Cheshire':        {'earl': {'given': 'John',      'surname': 'de Lacy'}},
+    'Derbyshire':      {'earl': {'given': 'William',   'surname': 'de Ferrers'}},
+    'Nottinghamshire': {'earl': {'given': 'Roger',     'surname': 'de Mortimer'}},
+    'Lincolnshire':    {'earl': {'given': 'Ranulf',    'surname': 'de Blondeville'}},
+    'Staffordshire':   {'earl': {'given': 'Robert',    'surname': 'de Stafford'}},
+    'Leicestershire':  {'earl': {'given': 'Simon',     'surname': 'de Montfort'}},
+    'Shropshire':      {'earl': {'given': 'John',      'surname': 'FitzAlan'}},
+    'Herefordshire':   {'earl': {'given': 'Humphrey',  'surname': 'de Bohun'}},
+    'Worcestershire':  {'earl': {'given': 'William',   'surname': 'de Beauchamp'}},
+    'Warwickshire':    {'earl': {'given': 'Henry',     'surname': 'de Hastings'}},
+    'Gloucestershire': {'earl': {'given': 'Richard',   'surname': 'de Clare'}},
+    'Oxfordshire':     {'earl': {'given': 'Roger',     'surname': 'de Vere'}},
+    'Buckinghamshire': {'earl': {'given': 'Walter',    'surname': 'Giffard'}},
+    'Northamptonshire':{'earl': {'given': 'Saher',     'surname': 'de Quincy'}},
+    'Bedfordshire':    {'earl': {'given': 'Roger',     'surname': 'de Beauchamp'}},
+    'Norfolk':         {'earl': {'given': 'Roger',     'surname': 'Bigod'}},
+    'Suffolk':         {'earl': {'given': 'Hugh',      'surname': 'Bigod'}},
+    'Essex':           {'earl': {'given': 'Geoffrey',  'surname': 'de Mandeville'}},
+    'Cambridgeshire':  {'earl': {'given': 'John',      'surname': 'de Burgh'}},
+    'Hertfordshire':   {'earl': {'given': 'Roger',     'surname': 'de Tony'}},
+    'Middlesex':       {'earl': {'given': 'Henry',     'surname': 'Plantagenet'}},    # crown-direct
+    'Kent':            {'earl': {'given': 'Hubert',    'surname': 'de Burgh'}},
+    'Surrey':          {'earl': {'given': 'John',      'surname': 'de Warenne'}},
+    'Sussex':          {'earl': {'given': 'John',      'surname': 'de Braose'}},
+    'Berkshire':       {'earl': {'given': 'Henry',     'surname': 'Plantagenet'}},    # crown-direct
+    'Hampshire':       {'earl': {'given': 'Baldwin',   'surname': 'de Reviers'}},
+    'Wiltshire':       {'earl': {'given': 'Patrick',   'surname': 'de Chaworth'}},
+    'Dorset':          {'earl': {'given': 'William',   'surname': 'de Mandeville'}},
+    'Somerset':        {'earl': {'given': 'Roger',     'surname': 'de Clifford'}},
+    'Devon':           {'earl': {'given': 'Hugh',      'surname': 'de Courtenay'}},
+    'Cornwall':        {'earl': {'given': 'Richard',   'surname': 'Plantagenet'}},    # earl of Cornwall is king's brother
+    'Gwynedd':         {'earl': {'given': 'Llywelyn',  'surname': 'ap Gruffudd'}},
+    'Perfeddwlad':     {'earl': {'given': 'Dafydd',    'surname': 'ap Gruffudd'}},
+    'Powys':           {'earl': {'given': 'Gruffudd',  'surname': 'Maelor'}},
+    'Ceredigion':      {'earl': {'given': 'Maredudd',  'surname': 'ap Owain'}},
+    'Dyfed':           {'earl': {'given': 'Rhys',      'surname': 'ap Maredudd'}},
+    'Gower':           {'earl': {'given': 'John',      'surname': 'de Mowbray'}},
+    'Glamorgan':       {'earl': {'given': 'Richard',   'surname': 'de Clare'}},
+    'Gwent':           {'earl': {'given': 'Humphrey',  'surname': 'de Bohun'}},
+    'Highland':        {'earl': {'given': 'William',   'surname': 'of Ross'}},
+    'Argyll':          {'earl': {'given': 'Eóghan',    'surname': 'of Lorn'}},
+    'Orkney':          {'earl': {'given': 'Magnus',    'surname': 'Sinclair'}},
+    'Moray':           {'earl': {'given': 'Alexander', 'surname': 'Comyn'}},
+    'Strathearn':      {'earl': {'given': 'Malise',    'surname': 'of Strathearn'}},
+    'Fife':            {'earl': {'given': 'Malcolm',   'surname': 'MacDuff'}},
+    'Lothian':         {'earl': {'given': 'Alexander', 'surname': 'Dunkeld'}},        # crown-direct (king)
+    'Borders':         {'earl': {'given': 'Walter',    'surname': 'Comyn'}},
+    'Strathclyde':     {'earl': {'given': 'Maldouen',  'surname': 'of Lennox'}},
+    'Galloway':        {'earl': {'given': 'Dervorguilla','surname': 'Balliol'}},
 }
 
 
@@ -196,43 +200,112 @@ FERTILITY_BY_DUCHY = {
 # Each entry seeds one royal family + the current monarch character.
 # Successor logic + family tree expansion come in later phases.
 MONARCHS = {
-    "england":  {"given": "Henry",     "surname": "Plantagenet", "title": "King",   "age": 39},
-    "wales":    {"given": "Llywelyn",  "surname": "ap Iorwerth", "title": "Prince", "age": 24},
-    "scotland": {"given": "Alexander", "surname": "Dunkeld",     "title": "King",   "age": 49},
+    "england":  {"given": "Henry",     "surname": "Plantagenet", "title": "King",   "age": 39, "gender": "male"},
+    "wales":    {"given": "Llywelyn",  "surname": "ap Iorwerth", "title": "Prince", "age": 24, "gender": "male"},
+    "scotland": {"given": "Alexander", "surname": "Dunkeld",     "title": "King",   "age": 49, "gender": "male"},
 }
 
-# Anglo-Norman / Welsh / Scottish given-name pools, used for deterministic
+# Anglo-Norman / Welsh / Scottish given-name pools used for deterministic
 # barony-baron generation. Each LAD picks one name via a hash of its code.
-_GIVEN_NAMES = {
+# Male and female pools kept separate so a baron's spouse can be generated
+# alongside him without name-gender clashes.
+_GIVEN_NAMES_MALE = {
     "E": ["William", "Robert", "John", "Henry", "Geoffrey", "Hugh",
-          "Walter", "Roger", "Richard", "Thomas", "Ralph", "Simon"],
+          "Walter", "Roger", "Richard", "Thomas", "Ralph", "Simon",
+          "Edmund", "Edward", "Nicholas", "Reginald", "Stephen", "Gilbert",
+          "Philip", "Peter", "Alan", "Eustace", "Aymer", "Baldwin"],
     "W": ["Llywelyn", "Dafydd", "Gruffudd", "Rhys", "Maredudd", "Owain",
-          "Cadwgan", "Bleddyn", "Iorwerth", "Hywel"],
+          "Cadwgan", "Bleddyn", "Iorwerth", "Hywel", "Madog", "Cynan",
+          "Goronwy", "Tudur", "Idwal", "Caradog"],
     "S": ["Alexander", "William", "Robert", "John", "Donald", "Malcolm",
-          "Hugh", "Walter", "Patrick", "Duncan"],
+          "Hugh", "Walter", "Patrick", "Duncan", "Angus", "Kenneth",
+          "Fergus", "Gillespie", "Murdoch", "Niall", "Lachlan"],
+}
+_GIVEN_NAMES_FEMALE = {
+    "E": ["Eleanor", "Margaret", "Isabel", "Matilda", "Joan", "Alice",
+          "Cecily", "Mabel", "Beatrice", "Hawise", "Constance", "Aveline",
+          "Sibyl", "Avice", "Petronilla", "Rohese", "Idonea", "Margery"],
+    "W": ["Gwenllian", "Angharad", "Nest", "Senena", "Marared", "Gwerful",
+          "Tangwystl", "Goewin", "Catrin", "Efa"],
+    "S": ["Margaret", "Isabella", "Mary", "Eufemia", "Christina", "Marjorie",
+          "Devorguilla", "Ada", "Forbflaith", "Joanna"],
 }
 
-# Per-country surname particle for generated barons. Real medieval naming was
-# all over the place; these are placeholders the user can hand-override.
-_SURNAME_PARTICLE = {"E": "de ", "W": "ap ", "S": "of "}
+# Real Anglo-Norman, Welsh, and Scottish family surnames in 1247. Mixed with
+# the toponymic "de [Place]" pattern so generated barons feel varied instead
+# of every LAD getting "John de Birmingham".
+_SURNAMES = {
+    "E": ["de Beaumont", "Mortimer", "de Bohun", "Bigod", "de Lacy",
+          "de Clare", "de Quincy", "Marshal", "de Warenne", "de Mowbray",
+          "de Vere", "de Beauchamp", "de Ferrers", "de Stafford", "de Mandeville",
+          "le Despenser", "de Hastings", "de Percy", "de Neville", "de Tony",
+          "de Furnival", "d'Audley", "de Camville", "de Berkeley", "Giffard",
+          "Mauduit", "de Verdun", "de Briouze", "de Cantilupe", "Bardolf",
+          "Burnell", "de Cobham", "de Greystoke", "Latimer", "de Mauley",
+          "de Roos", "de Welles", "Wake", "la Zouche", "de Astley",
+          "de Charlton", "Engaine", "de Multon", "de Sandford", "St. John",
+          "FitzAlan", "FitzWalter", "FitzHugh", "FitzGerald"],
+    "W": ["ap Maredudd", "ap Cadwgan", "ap Hywel", "ap Iorwerth", "ap Bleddyn",
+          "ap Gruffudd", "ap Owain", "ap Llywelyn", "ap Madog", "ap Rhys",
+          "ap Dafydd", "ap Cynan", "ap Goronwy", "Maelor"],
+    "S": ["Comyn", "Bruce", "Stewart", "Murray", "Fraser", "Graham",
+          "Lindsay", "Sinclair", "Sutherland", "MacDuff", "Campbell",
+          "Douglas", "Hamilton", "Ramsay", "Maxwell", "Wallace",
+          "of Ross", "of Lorn", "of Lennox", "of Mar", "of Buchan",
+          "Balliol", "de Brus", "of Atholl", "of Strathearn"],
+}
+
+
+def _hash_int(*parts):
+    """Stable int from arbitrary string components, used as a deterministic RNG."""
+    h = hashlib.md5(":".join(str(p) for p in parts).encode("utf-8")).hexdigest()
+    return int(h[:8], 16)
 
 
 def _pick_name(lad_code, lad_name):
-    """Deterministic baron given+surname from an LAD code."""
+    """Deterministic baron given+surname from an LAD code.
+
+    Args:
+      lad_code (str): LAD13CD (first char encodes country — E/W/S).
+      lad_name (str): LAD13NM (used as a fallback toponym anchor).
+    Returns:
+      dict: {given, surname, title, age, gender}
+    """
     country_prefix = lad_code[0] if lad_code else "E"
-    pool = _GIVEN_NAMES.get(country_prefix, _GIVEN_NAMES["E"])
-    n = int(hashlib.md5(lad_code.encode("utf-8")).hexdigest()[:8], 16)
-    given = pool[n % len(pool)]
-    # Strip common district-suffix noise from LAD13NM for surname seed.
-    base = lad_name.replace(" District", "").replace(" City", "").strip()
-    # Drop trailing "and Bute" / parenthetical bits — they read odd in family names.
-    if " and " in base:
-        base = base.split(" and ", 1)[0]
-    if " " in base:
-        # Take first word — feels more like a place name.
-        base = base.split(" ", 1)[0]
-    surname = _SURNAME_PARTICLE.get(country_prefix, "de ") + base
-    return {"given": given, "surname": surname, "title": "Baron", "age": 30 + (n % 30)}
+    male_pool = _GIVEN_NAMES_MALE.get(country_prefix, _GIVEN_NAMES_MALE["E"])
+    surname_pool = _SURNAMES.get(country_prefix, _SURNAMES["E"])
+    n_given = _hash_int(lad_code, "given")
+    n_surname = _hash_int(lad_code, "surname")
+    n_age = _hash_int(lad_code, "age")
+    # 70% chance: pick from the family-name pool (varied historical surnames).
+    # 30% chance: build a toponym from the LAD name (anchors barons to place).
+    use_toponym = (_hash_int(lad_code, "surname-style") % 100) < 30
+    if use_toponym:
+        base = lad_name.replace(" District", "").replace(" City", "").strip()
+        if " and " in base:
+            base = base.split(" and ", 1)[0]
+        if " " in base:
+            base = base.split(" ", 1)[0]
+        particle = {"E": "de ", "W": "ap ", "S": "of "}.get(country_prefix, "de ")
+        surname = particle + base
+    else:
+        surname = surname_pool[n_surname % len(surname_pool)]
+    return {
+        "given": male_pool[n_given % len(male_pool)],
+        "surname": surname,
+        "title": "Baron",
+        "age": 22 + (n_age % 45),     # 22..66
+        "gender": "male",
+    }
+
+
+def name_pools():
+    """Expose the pools so GameState.gd can use them for spouse/child generation."""
+    return {
+        "male": _GIVEN_NAMES_MALE,
+        "female": _GIVEN_NAMES_FEMALE,
+        "surnames": _SURNAMES,
+    }
 
 
 def build_barony_holders(geometry):
@@ -402,7 +475,7 @@ def main():
     barony_holders = build_barony_holders(geometry)
 
     out = {
-        "meta": {"version": 3, "notes": "Hand-edit freely; reload Godot to apply."},
+        "meta": {"version": 4, "notes": "Hand-edit freely; reload Godot to apply."},
         "monarchs":              MONARCHS,
         "barony_holders":        barony_holders,
         "duchies":               DUCHY_DESIGN,
@@ -415,6 +488,9 @@ def main():
         "faction_seed":          FACTION_SEED,
         "country_by_duchy":      COUNTRY_BY_DUCHY,
         "factions_by_duchy":     FACTIONS_BY_DUCHY,
+        # Name pools so GameState can generate consistent spouse/child names
+        # at seed time without re-implementing the lists in GDScript.
+        "name_pools":            name_pools(),
     }
     os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
     with open(OUTPUT_PATH, "w", encoding="utf-8") as f:

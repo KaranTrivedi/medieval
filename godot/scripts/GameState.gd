@@ -2,28 +2,29 @@
 # Autoload singleton — owns the SQLite-backed mutable game state.
 #
 # DATA SPLIT
-#   res://data/gb_godot.json  — IMMUTABLE map geometry/topology (MapData)
-#   user://current.db              — LIVE working save (auto-resumes)
-#   user://saves/slot*.db          — explicit checkpoints from the Save button
+#   res://data/gb_godot.json   — IMMUTABLE map geometry/topology (MapData)
+#   res://data/gb_design.json  — IMMUTABLE design layer (DesignData)
+#   user://current.db          — LIVE working save (auto-resumes)
+#   user://saves/slot*.db      — explicit checkpoints from the Save button
 #
-# Schema lives below as `_migrate()`. Schema version is recorded in the `meta`
-# table; future versions add ALTERs gated on that value.
+# SCHEMA
+# Game-state tables: factions, counties_state, turns, harvest_params.
+# Political layer:   families, characters, holdings, relationships.
+# All created in one shot in `_create_schema()` — no migration scaffolding,
+# we're pre-1.0 and breaking changes are fine. If the schema changes here,
+# delete user://current.db (or let `new_game()` overwrite it).
 
 extends Node
 
-const SCHEMA_VERSION := 3
 const WORKING_DB := "user://current.db"
 const SAVES_DIR  := "user://saves/"
 
-# Design-data source-of-truth lookups. The actual values used to live as
-# const dicts here; they've been moved to data/gb_design.json (loaded by
-# the DesignData autoload). These accessors return the live design data,
-# falling back to safe minimal defaults if the autoload hasn't loaded yet.
+# Design-data accessors with safe fallbacks. The actual values come from
+# DesignData (autoload that loads data/gb_design.json before us).
 
 func _factions_by_duchy() -> Dictionary:
 	if DesignData.loaded:
 		return DesignData.factions_by_duchy
-	# Minimal fallback so a missing design file doesn't crash autoload.
 	return {"lancaster": "england", "wales": "wales", "scotland": "scotland"}
 
 
@@ -42,8 +43,6 @@ func _fertility_by_duchy() -> Dictionary:
 func _default_harvest_params() -> Array:
 	if DesignData.loaded:
 		return DesignData.default_harvest_params
-	# Minimal flat distribution — keeps end_turn() functional in the
-	# unlikely case that DesignData failed to load.
 	return [
 		{"season": 0, "mean": 0.5, "std_dev": 0.1, "min_val": 0.2, "max_val": 1.0, "description": "default"},
 		{"season": 1, "mean": 0.5, "std_dev": 0.1, "min_val": 0.2, "max_val": 1.0, "description": "default"},
@@ -54,45 +53,30 @@ func _default_harvest_params() -> Array:
 var db: SQLite = null
 var player_faction_id: String = "england"
 
-# Fired whenever persistent state mutates. UI panels listen and refresh.
 signal state_changed
 
 
-# Engine-invoked on autoload init. Resumes the working DB if one exists,
-# otherwise spins up a fresh game.
-#
-# Args: none
-# Returns: void
 func _ready() -> void:
 	DirAccess.make_dir_recursive_absolute(SAVES_DIR)
 	if FileAccess.file_exists(WORKING_DB):
 		_open(WORKING_DB)
-		_migrate()
+		_create_schema()
 		print("GameState: resumed working save at ", WORKING_DB,
 				" (turn=", current_turn(), ")")
 	else:
 		new_game("england")
 
 
-# Start a fresh game: deletes any working db, creates the schema, then waits
-# for MapData and seeds factions + county ownership.
-#
-# Args:
-#   player_id (String): Faction id the human plays (must exist in FACTION_SEED).
-# Returns: void
+# Start a fresh game.
 func new_game(player_id: String) -> void:
 	player_faction_id = player_id
-	# Critical: close the existing SQLite handle BEFORE deleting the file.
-	# Windows locks the file while it's open, so remove_absolute silently
-	# fails and the "new game" inherits the old turn count + treasury.
-	# Closing first releases the lock so the delete actually succeeds.
 	if db != null:
 		db.close_db()
 		db = null
 	if FileAccess.file_exists(WORKING_DB):
 		DirAccess.remove_absolute(WORKING_DB)
 	_open(WORKING_DB)
-	_migrate()
+	_create_schema()
 	if not MapData.is_loaded:
 		await MapData.map_loaded
 	_seed()
@@ -101,13 +85,6 @@ func new_game(player_id: String) -> void:
 	state_changed.emit()
 
 
-# Load a save slot into the working DB (so all edits happen on the working
-# copy and the slot file is untouched until the next Save).
-#
-# Args:
-#   path (String): user:// path of the slot .db file.
-# Returns:
-#   bool: true on success, false if the file does not exist or copy failed.
 func load_save(path: String) -> bool:
 	if not FileAccess.file_exists(path):
 		push_error("GameState.load_save: no such file " + path)
@@ -119,25 +96,18 @@ func load_save(path: String) -> bool:
 		push_error("GameState.load_save: copy failed (err=%d)" % err)
 		return false
 	_open(WORKING_DB)
-	_migrate()
+	_create_schema()
 	state_changed.emit()
 	return true
 
 
-# Copy the working DB to the given save slot. The DB is closed-then-reopened
-# around the copy so SQLite has flushed its journal to disk first.
-#
-# Args:
-#   path (String): destination user:// path (creates parent dir if needed).
-# Returns:
-#   bool: true on success.
 func save_to(path: String) -> bool:
 	if db == null:
 		return false
 	DirAccess.make_dir_recursive_absolute(path.get_base_dir())
 	db.close_db()
 	var err := DirAccess.copy_absolute(WORKING_DB, path)
-	db.open_db()  # always reopen, even on copy failure, so we don't strand the session
+	db.open_db()
 	if err != OK:
 		push_error("GameState.save_to: copy failed (err=%d) to %s" % [err, path])
 		return false
@@ -147,7 +117,6 @@ func save_to(path: String) -> bool:
 
 # ── QUERIES ───────────────────────────────────────────────────────────────────
 
-# Read the latest turn number (or 0 if no turns exist yet).
 func current_turn() -> int:
 	db.query("SELECT MAX(turn_number) AS t FROM turns;")
 	if db.query_result.is_empty() or db.query_result[0]["t"] == null:
@@ -155,31 +124,12 @@ func current_turn() -> int:
 	return int(db.query_result[0]["t"])
 
 
-# Run one full end-of-turn step for the player faction:
-#   1. Resolve the season being ended (turn N occupies season (N-1) % 4 per
-#      advance_turn). Look up its Gaussian params from harvest_params.
-#   2. For every county the player owns, roll N(mean, σ) clamped to
-#      [min_val, max_val] for THIS SEASON, then multiply by base_income and
-#      county fertility. Sum the rolled incomes.
-#   3. Credit the total to the player's treasury.
-#   4. Advance the turn counter (which moves us into the next season).
-#
-# Args: none — operates on player_faction_id and the season of the current turn.
-# Returns:
-#   Dictionary: {
-#       "turn":          int,     # new turn number (after advancing)
-#       "season_ended":  int,     # season index 0..3 just resolved
-#       "season_name":   String,  # human-readable
-#       "total_income":  int,     # treasury delta this turn
-#       "counties":      Array,   # per-county [{id, base, fertility, mult, income}]
-#       "treasury":      int,     # treasury value AFTER applying income
-#   }
+# Run one full end-of-turn step for the player faction. See the previous
+# version of this file in git history for the per-line walk-through.
 func end_turn() -> Dictionary:
 	const SEASON_NAMES := ["Spring", "Summer", "Autumn", "Winter"]
 	var summary: Dictionary = {"counties": [], "total_income": 0}
 
-	# The CURRENT turn's season is what we're resolving. advance_turn() at the
-	# bottom will move us into the next one.
 	var cur_turn: int = maxi(current_turn(), 1)
 	var season_idx: int = (cur_turn - 1) % 4
 	var params: Dictionary = get_harvest_params(season_idx)
@@ -188,8 +138,6 @@ func end_turn() -> Dictionary:
 		"SELECT county_id, fertility FROM counties_state WHERE owner_faction_id = ?;",
 		[player_faction_id]
 	)
-	# Snapshot now — sample_clamped / adjust_treasury issue their own queries
-	# that would otherwise stomp db.query_result mid-iteration.
 	var owned: Array = []
 	for row in db.query_result:
 		owned.append({"id": row["county_id"], "fertility": float(row["fertility"])})
@@ -212,8 +160,6 @@ func end_turn() -> Dictionary:
 	summary.season_ended = season_idx
 	summary.season_name = SEASON_NAMES[season_idx]
 	if total != 0:
-		# Apply treasury delta directly so we only emit state_changed ONCE per
-		# end-turn (via advance_turn below) instead of twice.
 		db.query_with_bindings(
 			"UPDATE factions SET treasury = treasury + ? WHERE id = ?;",
 			[total, player_faction_id]
@@ -224,14 +170,6 @@ func end_turn() -> Dictionary:
 	return summary
 
 
-# Look up the harvest distribution params for one season.
-#
-# Args:
-#   season (int): 0..3 — index into the harvest_params table.
-# Returns:
-#   Dictionary: {mean, std_dev, min_val, max_val, description}. Falls back to
-#       a sensible default if the row is missing (shouldn't happen after
-#       _migrate seeds the table, but keeps end_turn robust).
 func get_harvest_params(season: int) -> Dictionary:
 	db.query_with_bindings("SELECT * FROM harvest_params WHERE season = ?;", [season])
 	if db.query_result.is_empty():
@@ -241,18 +179,6 @@ func get_harvest_params(season: int) -> Dictionary:
 	return db.query_result[0].duplicate()
 
 
-# Overwrite the params for one season — used by climate events, mod tooling,
-# or debug commands. Emits state_changed so any UI showing the distribution
-# refreshes.
-#
-# Args:
-#   season (int): 0..3 — which row to update.
-#   mean (float): Distribution centre.
-#   std_dev (float): Standard deviation (>= 0).
-#   min_val (float): Clamp floor.
-#   max_val (float): Clamp ceiling.
-#   description (String): Free-text label for chronicle/debug display.
-# Returns: void
 func set_harvest_params(season: int, mean: float, std_dev: float,
 		min_val: float, max_val: float, description: String) -> void:
 	db.query_with_bindings(
@@ -262,15 +188,10 @@ func set_harvest_params(season: int, mean: float, std_dev: float,
 	state_changed.emit()
 
 
-# Append the next turn row. Year/season derived from turn count, starting at
-# 1247 spring (turn 1) per Project.md.
-#
-# Returns:
-#   int: the newly-inserted turn number.
 func advance_turn() -> int:
 	var prev := current_turn()
 	var next := prev + 1
-	var season := prev % 4              # 0=Spring,1=Summer,2=Autumn,3=Winter
+	var season := prev % 4
 	var year := 1247 + int(prev / 4)
 	db.query_with_bindings(
 		"INSERT INTO turns(turn_number, year, season, active_faction_id, processed_at) VALUES(?,?,?,?,?);",
@@ -280,12 +201,6 @@ func advance_turn() -> int:
 	return next
 
 
-# Look up one county's mutable state row.
-#
-# Args:
-#   county_id (String): primary key (matches MapData county name e.g. "Yorkshire").
-# Returns:
-#   Dictionary: column → value, or {} if not found.
 func county_state(county_id: String) -> Dictionary:
 	db.query_with_bindings("SELECT * FROM counties_state WHERE county_id = ?;", [county_id])
 	if db.query_result.is_empty():
@@ -293,18 +208,9 @@ func county_state(county_id: String) -> Dictionary:
 	return db.query_result[0].duplicate()
 
 
-# Patch one county_state row.
-#
-# Args:
-#   county_id (String): primary key.
-#   patch (Dictionary): column → new value. Columns not in this dict are untouched.
-# Returns: void
 func set_county_state(county_id: String, patch: Dictionary) -> void:
 	if patch.is_empty():
 		return
-	# select_rows/update_rows in the addon accept a where-CLAUSE string. To
-	# avoid string interpolation of user data, we instead run a parameterised
-	# UPDATE manually.
 	var cols := []
 	var values := []
 	for k in patch:
@@ -318,12 +224,6 @@ func set_county_state(county_id: String, patch: Dictionary) -> void:
 	state_changed.emit()
 
 
-# Fetch one faction row.
-#
-# Args:
-#   id (String): faction id (e.g. "england").
-# Returns:
-#   Dictionary: column → value, or {} if not found.
 func faction(id: String) -> Dictionary:
 	db.query_with_bindings("SELECT * FROM factions WHERE id = ?;", [id])
 	if db.query_result.is_empty():
@@ -331,13 +231,6 @@ func faction(id: String) -> Dictionary:
 	return db.query_result[0].duplicate()
 
 
-# Apply a delta to a faction's treasury.
-#
-# Args:
-#   faction_id (String): id key into factions.
-#   delta (int): positive = income, negative = expense.
-# Returns:
-#   int: new treasury value (0 if faction not found).
 func adjust_treasury(faction_id: String, delta: int) -> int:
 	db.query_with_bindings(
 		"UPDATE factions SET treasury = treasury + ? WHERE id = ?;",
@@ -348,9 +241,123 @@ func adjust_treasury(faction_id: String, delta: int) -> int:
 	return int(f.get("treasury", 0))
 
 
+# ── POLITICAL LAYER (read API) ────────────────────────────────────────────────
+
+# Look up the head-of-family currently holding a region.
+#
+# Args:
+#   region_type (String): "country" | "duchy" | "county" | "barony".
+#   region_id (String): country id, duchy id, county name, or LAD13CD.
+# Returns:
+#   Dictionary: {given_name, surname, title, age, character_id, family_id,
+#                prestige} or {} if no holder is recorded.
+func holder_of(region_type: String, region_id: String) -> Dictionary:
+	db.query_with_bindings("""
+		SELECT c.id AS character_id, c.given_name, c.title, c.age, c.gender, c.alive,
+		       f.id AS family_id, f.surname, f.prestige
+		FROM holdings h
+		JOIN characters c ON c.id = h.holder_character_id
+		JOIN families   f ON f.id = h.holder_family_id
+		WHERE h.region_type = ? AND h.region_id = ?
+		LIMIT 1;""",
+		[region_type, region_id]
+	)
+	if db.query_result.is_empty():
+		return {}
+	return db.query_result[0].duplicate()
+
+
+# Full character record + family info.
+#
+# Args:
+#   character_id (int): characters.id primary key.
+# Returns:
+#   Dictionary with character + family columns flattened, or {} if not found.
+func character(character_id: int) -> Dictionary:
+	db.query_with_bindings("""
+		SELECT c.id AS character_id, c.given_name, c.title, c.age, c.gender, c.alive,
+		       c.martial, c.diplomacy, c.stewardship, c.intrigue, c.piety,
+		       c.traits_json,
+		       f.id AS family_id, f.surname, f.prestige
+		FROM characters c
+		LEFT JOIN families f ON f.id = c.family_id
+		WHERE c.id = ?
+		LIMIT 1;""",
+		[character_id]
+	)
+	if db.query_result.is_empty():
+		return {}
+	return db.query_result[0].duplicate()
+
+
+# Read a family row.
+func family(family_id: int) -> Dictionary:
+	db.query_with_bindings("SELECT * FROM families WHERE id = ?;", [family_id])
+	if db.query_result.is_empty():
+		return {}
+	return db.query_result[0].duplicate()
+
+
+# Walk relationships for one character. Returns rows shaped as
+#   {kind, other: {character_id, given_name, surname, ...}}
+# Kinds: "spouse", "parent", "child", "sibling".
+func relations_of(character_id: int) -> Array:
+	db.query_with_bindings("""
+		SELECT r.kind, c.id AS character_id, c.given_name, c.title, c.age, c.gender, c.alive,
+		       f.id AS family_id, f.surname
+		FROM relationships r
+		JOIN characters c ON c.id = r.related_id
+		LEFT JOIN families f ON f.id = c.family_id
+		WHERE r.character_id = ?
+		ORDER BY CASE r.kind
+			WHEN 'parent' THEN 0
+			WHEN 'spouse' THEN 1
+			WHEN 'sibling' THEN 2
+			WHEN 'child' THEN 3
+			ELSE 9
+		END, c.age DESC;""",
+		[character_id]
+	)
+	var out: Array = []
+	for row in db.query_result:
+		out.append({
+			"kind": str(row["kind"]),
+			"other": {
+				"character_id": int(row["character_id"]),
+				"given_name": str(row["given_name"]),
+				"surname": str(row["surname"]),
+				"title": str(row["title"]),
+				"age": int(row["age"]),
+				"gender": str(row["gender"]),
+				"alive": int(row["alive"]) != 0,
+				"family_id": int(row["family_id"]) if row["family_id"] != null else 0,
+			}
+		})
+	return out
+
+
+# Regions currently held by a character.
+func holdings_of(character_id: int) -> Array:
+	db.query_with_bindings("""
+		SELECT region_type, region_id FROM holdings
+		WHERE holder_character_id = ?
+		ORDER BY CASE region_type
+			WHEN 'country' THEN 0 WHEN 'duchy' THEN 1
+			WHEN 'county' THEN 2 WHEN 'barony' THEN 3
+			ELSE 9 END, region_id;""",
+		[character_id]
+	)
+	var out: Array = []
+	for row in db.query_result:
+		out.append({
+			"region_type": str(row["region_type"]),
+			"region_id": str(row["region_id"]),
+		})
+	return out
+
+
 # ── INTERNAL ──────────────────────────────────────────────────────────────────
 
-# Open (or create) the SQLite db at the given path. foreign_keys ON.
 func _open(path: String) -> void:
 	db = SQLite.new()
 	db.path = path
@@ -358,14 +365,8 @@ func _open(path: String) -> void:
 	db.open_db()
 
 
-# Create or upgrade the schema. Idempotent: safe to re-run on an already-
-# migrated DB. Reads meta.schema_version to know what migration steps to
-# apply on top of the base CREATE TABLE IF NOT EXISTS layer.
-func _migrate() -> void:
-	# Base tables — created with the CURRENT schema, so fresh DBs land at
-	# the latest version with no per-version ALTER work. Existing v1 DBs
-	# skip these CREATEs (table already exists) and get patched below.
-	db.query("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);")
+# Create the full schema. Idempotent (CREATE TABLE IF NOT EXISTS).
+func _create_schema() -> void:
 	db.query("""
 		CREATE TABLE IF NOT EXISTS factions (
 			id TEXT PRIMARY KEY,
@@ -405,9 +406,7 @@ func _migrate() -> void:
 		);""")
 	db.query("CREATE INDEX IF NOT EXISTS idx_counties_owner ON counties_state(owner_faction_id);")
 
-	# v3 — political layer: families, characters, holdings. Lord/earl/baron
-	# strings from DesignData are parsed into Family + Character at seed
-	# time; holdings link each region to its current head-of-family.
+	# Political layer.
 	db.query("""
 		CREATE TABLE IF NOT EXISTS families (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -441,76 +440,22 @@ func _migrate() -> void:
 			updated_turn INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (region_type, region_id)
 		);""")
+	db.query("""
+		CREATE TABLE IF NOT EXISTS relationships (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			character_id INTEGER NOT NULL REFERENCES characters(id),
+			related_id INTEGER NOT NULL REFERENCES characters(id),
+			kind TEXT NOT NULL,
+			UNIQUE(character_id, related_id, kind)
+		);""")
 	db.query("CREATE INDEX IF NOT EXISTS idx_characters_family ON characters(family_id);")
 	db.query("CREATE INDEX IF NOT EXISTS idx_holdings_holder ON holdings(holder_character_id);")
-
-	# Version-gated patches for older DBs.
-	var prev_version: int = _read_schema_version()
-	if prev_version < 2:
-		_migrate_to_v2()
-	if prev_version < 3:
-		_migrate_to_v3()
-
-	db.query_with_bindings(
-		"INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?);",
-		[str(SCHEMA_VERSION)]
-	)
-
-	# Heal-on-resume: an earlier v3 migration created the tables but didn't
-	# seed (the first _migrate_to_v3 was a pass). Re-running here back-fills
-	# those DBs; idempotent via _seed_political's holdings-count guard.
-	_seed_political()
+	db.query("CREATE INDEX IF NOT EXISTS idx_rel_character ON relationships(character_id);")
+	db.query("CREATE INDEX IF NOT EXISTS idx_rel_related ON relationships(related_id);")
 
 
-# Read the stored schema_version. Returns 0 if meta is absent or empty (which
-# means "brand-new DB, treat as pre-v1 — every migration step needs to run").
-func _read_schema_version() -> int:
-	db.query("SELECT value FROM meta WHERE key = 'schema_version';")
-	if db.query_result.is_empty():
-		return 0
-	return int(db.query_result[0]["value"])
-
-
-# v1 → v2 upgrade. Adds the fertility column to existing counties_state rows
-# and back-fills harvest_params from DEFAULT_HARVEST_PARAMS. Safe to run on a
-# fresh DB too (no-ops when nothing's missing).
-func _migrate_to_v2() -> void:
-	# 1. fertility column on counties_state. SQLite can't `ADD COLUMN IF NOT
-	#    EXISTS`, so check via PRAGMA before issuing the ALTER.
-	db.query("PRAGMA table_info(counties_state);")
-	var has_fertility := false
-	for row in db.query_result:
-		if str(row.get("name", "")) == "fertility":
-			has_fertility = true
-			break
-	if not has_fertility:
-		db.query("ALTER TABLE counties_state ADD COLUMN fertility REAL NOT NULL DEFAULT 1.0;")
-
-	# 2. Seed harvest_params if empty. We INSERT OR IGNORE so a partial seed
-	#    (somehow) doesn't overwrite player-tuned values.
-	db.query("SELECT COUNT(*) AS c FROM harvest_params;")
-	if int(db.query_result[0]["c"]) == 0:
-		for p in _default_harvest_params():
-			db.query_with_bindings(
-				"INSERT OR IGNORE INTO harvest_params(season, mean, std_dev, min_val, max_val, description) VALUES(?,?,?,?,?,?);",
-				[p.season, p.mean, p.std_dev, p.min_val, p.max_val, p.description]
-			)
-
-
-# v2 → v3 upgrade. Tables already created by the CREATE TABLE IF NOT EXISTS
-# block above; this step seeds the political layer for saves that came up
-# from v2 without ever hitting new_game() (the seed normally runs there).
-# _seed_political() is idempotent — it early-returns if holdings is non-empty.
-func _migrate_to_v3() -> void:
-	_seed_political()
-
-
-# Populate factions + counties_state from MapData. INSERT OR IGNORE makes this
-# safe to call on an existing seeded DB (it won't clobber treasuries etc).
-#
-# Per-county fertility is derived as FERTILITY_BY_DUCHY[duchy] + small Gaussian
-# noise (σ=0.08), clamped to [0.4, 1.6]. Counties whose duchy isn't in the
-# table fall back to 1.0.
+# Seed the full game state from MapData + DesignData. INSERT OR IGNORE makes
+# this safe to re-run; the political-seed step uses its own emptiness guard.
 func _seed() -> void:
 	var factions_by_duchy: Dictionary = _factions_by_duchy()
 	var fertility_by_duchy: Dictionary = _fertility_by_duchy()
@@ -536,78 +481,45 @@ func _seed() -> void:
 			[cname, owner, garrison, fertility, 0]
 		)
 
-	# Back-fill fertility on v1→v2 migrated rows that were left at the
-	# default 1.0 — the duchy-derived value reads more meaningfully.
-	for cname in MapData.counties:
-		var co: Dictionary = MapData.counties[cname]
-		var duchy: String = co.get("duchy", "")
-		var base_fertility: float = fertility_by_duchy.get(duchy, 1.0)
-		var fertility: float = clampf(
-			GaussianSystem.sample(base_fertility, 0.08),
-			0.4, 1.6
-		)
+	# Seed harvest_params from DesignData.
+	for p in _default_harvest_params():
 		db.query_with_bindings(
-			"UPDATE counties_state SET fertility = ? WHERE county_id = ? AND fertility = 1.0;",
-			[fertility, cname]
+			"INSERT OR IGNORE INTO harvest_params(season, mean, std_dev, min_val, max_val, description) VALUES(?,?,?,?,?,?);",
+			[p.season, p.mean, p.std_dev, p.min_val, p.max_val, p.description]
 		)
 
-	# Political layer (v3): families, characters, holdings. Run once per
-	# fresh game — INSERT OR IGNORE keeps it safe on reseed.
 	_seed_political()
 
 	if current_turn() == 0:
 		advance_turn()
 
 
-# Split a lord/earl/baron string from the design layer into (given, surname).
-# Heuristics (best-effort — design strings vary):
-#   "John de Lacy"         → ("John", "de Lacy")
-#   "FitzAlan"             → ("",     "FitzAlan")     (only surname)
-#   "Crown Direct"         → ("Crown","Direct")       (placeholder)
-#   "Wm. de Beauchamp"     → ("Wm.",  "de Beauchamp")
-#   "Llywelyn ap Gruffudd" → ("Llywelyn", "ap Gruffudd")
-#   "Prince-Bishop"        → ("",     "Prince-Bishop") (titular)
-# Strings containing parenthetical asides have those stripped first.
-func _parse_lord_name(s: String) -> Dictionary:
-	var t: String = s.strip_edges()
-	# Strip "( ... )" trailing context like "Crown Direct (London)".
-	var paren := t.find("(")
-	if paren > 0:
-		t = t.substr(0, paren).strip_edges()
-	if t == "":
-		return {"given": "", "surname": "Unknown"}
-	var parts: PackedStringArray = t.split(" ", false)
-	if parts.size() == 1:
-		return {"given": "", "surname": parts[0]}
-	# Otherwise: first token = given, the rest = surname.
-	return {"given": parts[0], "surname": " ".join(parts.slice(1))}
+# Helpers used by the seed.
 
-
-# Get-or-create a family row by surname. Returns the family id.
-func _ensure_family(surname: String) -> int:
-	if surname == "":
+func _ensure_family(surname: String, prestige: int = 50) -> int:
+	if surname.is_empty():
 		surname = "Unknown"
 	db.query_with_bindings("SELECT id FROM families WHERE surname = ?;", [surname])
 	if not db.query_result.is_empty():
 		return int(db.query_result[0]["id"])
 	db.query_with_bindings(
-		"INSERT INTO families(surname, prestige, founder_turn) VALUES(?,?,?);",
-		[surname, 50, 0]
+		"INSERT INTO families(surname, prestige, founder_turn) VALUES(?,?,0);",
+		[surname, prestige]
 	)
 	return db.get_last_insert_rowid()
 
 
-# Insert a character + return its id. Stats default to 5 (median 1..10).
-# Designer can override later via DesignData hand-edits.
-func _insert_character(given: String, family_id: int, title: String, age: int) -> int:
+func _insert_character(given: String, family_id: int, title: String, age: int,
+		gender: String = "male", alive: bool = true) -> int:
+	if given.is_empty():
+		given = "Anon"
 	db.query_with_bindings(
-		"INSERT INTO characters(given_name, family_id, title, age) VALUES(?,?,?,?);",
-		[given if given != "" else "Lord", family_id, title, max(18, age)]
+		"INSERT INTO characters(given_name, family_id, title, age, gender, alive) VALUES(?,?,?,?,?,?);",
+		[given, family_id, title, max(0, age), gender, 1 if alive else 0]
 	)
 	return db.get_last_insert_rowid()
 
 
-# Upsert a holding row linking a region to its current head-of-family.
 func _set_holding(region_type: String, region_id: String, character_id: int, family_id: int) -> void:
 	db.query_with_bindings(
 		"INSERT OR REPLACE INTO holdings(region_type, region_id, holder_character_id, holder_family_id, updated_turn) VALUES(?,?,?,?,?);",
@@ -615,14 +527,56 @@ func _set_holding(region_type: String, region_id: String, character_id: int, fam
 	)
 
 
-# Build the political layer from DesignData strings + monarchs + per-LAD
-# barony holders. Runs once on first new game; INSERT OR IGNORE / OR REPLACE
-# semantics make it safe to re-run.
+func _link(a_id: int, b_id: int, kind: String) -> void:
+	db.query_with_bindings(
+		"INSERT OR IGNORE INTO relationships(character_id, related_id, kind) VALUES(?,?,?);",
+		[a_id, b_id, kind]
+	)
+
+
+# Two-way insertion for symmetric or paired-inverse relations.
+#   spouse  → both directions, both "spouse"
+#   sibling → both directions, both "sibling"
+#   parent  → A is parent of B, so insert (A, B, "child") and (B, A, "parent")
+func _link_pair(a_id: int, b_id: int, kind_a_to_b: String) -> void:
+	match kind_a_to_b:
+		"spouse":
+			_link(a_id, b_id, "spouse")
+			_link(b_id, a_id, "spouse")
+		"sibling":
+			_link(a_id, b_id, "sibling")
+			_link(b_id, a_id, "sibling")
+		"child":
+			# A has child B → B has parent A
+			_link(a_id, b_id, "child")
+			_link(b_id, a_id, "parent")
+		"parent":
+			_link(a_id, b_id, "parent")
+			_link(b_id, a_id, "child")
+
+
+# Deterministic random helper based on a string + index. djb2-ish; we don't
+# need crypto here, just stability across runs so the same holder always gets
+# the same generated family.
+func _hash_int(seed_str: String, idx: int = 0) -> int:
+	var s := seed_str + ":" + str(idx)
+	var h: int = 5381
+	for i in range(s.length()):
+		h = ((h << 5) + h + s.unicode_at(i)) & 0x7FFFFFFF
+	return h
+
+
+# Build the political layer end-to-end from DesignData.
+# Each holder gets:
+#   - a Family (created lazily by surname)
+#   - a Character record + Holding row
+#   - a spouse (different family), 1–3 children (holder's family), 1 deceased parent
+#   - 0–1 sibling (50/50)
+# Idempotent — early-returns when holdings is non-empty.
 func _seed_political() -> void:
 	if not DesignData.loaded:
 		push_warning("GameState._seed_political: DesignData not loaded yet")
 		return
-	# Skip if we've already seeded (any holdings row exists).
 	db.query("SELECT COUNT(*) AS c FROM holdings;")
 	if int(db.query_result[0]["c"]) > 0:
 		return
@@ -631,65 +585,166 @@ func _seed_political() -> void:
 	for country in ["england", "wales", "scotland"]:
 		var m: Dictionary = DesignData.monarchs.get(country, {})
 		var sn: String = str(m.get("surname", country.capitalize()))
-		var gn: String = str(m.get("given", ""))
-		var fid: int = _ensure_family(sn)
+		var gn: String = str(m.get("given", "Anon"))
+		var fid: int = _ensure_family(sn, 100)
 		var cid: int = _insert_character(gn, fid, str(m.get("title", "Monarch")),
-				int(m.get("age", 35)))
+				int(m.get("age", 35)), str(m.get("gender", "male")))
 		_set_holding("country", country, cid, fid)
+		_seed_close_family(cid, sn, str(m.get("gender", "male")), int(m.get("age", 35)))
 
-	# DUCHIES — each has a `lord` field in DesignData.duchies.
+	# DUCHIES.
 	for did in DesignData.duchies:
-		var lord_str: String = str(DesignData.duchies[did].get("lord", ""))
-		var parsed: Dictionary = _parse_lord_name(lord_str)
-		var fid := _ensure_family(parsed.surname)
-		var cid := _insert_character(parsed.given, fid, "Duke", 40)
+		var lord: Dictionary = _holder_dict(DesignData.duchies[did].get("lord"))
+		var fid := _ensure_family(lord.surname, 75)
+		var cid := _insert_character(lord.given, fid, "Duke", lord.age, lord.gender)
 		_set_holding("duchy", did, cid, fid)
+		_seed_close_family(cid, lord.surname, lord.gender, lord.age)
 
-	# COUNTIES — `earl` field in DesignData.counties.
+	# COUNTIES.
 	for cn in DesignData.counties:
-		var earl_str: String = str(DesignData.counties[cn].get("earl", ""))
-		var parsed: Dictionary = _parse_lord_name(earl_str)
-		var fid := _ensure_family(parsed.surname)
-		var cid := _insert_character(parsed.given, fid, "Earl", 35)
+		var earl: Dictionary = _holder_dict(DesignData.counties[cn].get("earl"))
+		var fid := _ensure_family(earl.surname, 60)
+		var cid := _insert_character(earl.given, fid, "Earl", earl.age, earl.gender)
 		_set_holding("county", cn, cid, fid)
+		_seed_close_family(cid, earl.surname, earl.gender, earl.age)
 
-	# BARONIES — every LAD got a deterministic baron entry from extract_design.py.
+	# BARONIES.
 	for lad in DesignData.barony_holders:
 		var h: Dictionary = DesignData.barony_holders[lad]
-		var fid := _ensure_family(str(h.get("surname", "of " + lad)))
-		var cid := _insert_character(str(h.get("given", "")), fid,
-				str(h.get("title", "Baron")), int(h.get("age", 30)))
+		var bh: Dictionary = _holder_dict(h)
+		var fid := _ensure_family(bh.surname, 50)
+		var cid := _insert_character(bh.given, fid, bh.get("title", "Baron"),
+				bh.age, bh.gender)
 		_set_holding("barony", lad, cid, fid)
+		_seed_close_family(cid, bh.surname, bh.gender, bh.age)
 
-	print("GameState: seeded political layer — %d holdings" % _count_holdings())
+	print("GameState: seeded political layer — %d holdings, %d characters, %d families, %d relationships" % [
+		_count("holdings"), _count("characters"), _count("families"), _count("relationships")
+	])
 
 
-func _count_holdings() -> int:
-	db.query("SELECT COUNT(*) AS c FROM holdings;")
+# Normalise a holder field that might be either a dict ({given, surname,...})
+# or a legacy string ("John de Lacy") into a consistent dict shape.
+func _holder_dict(raw) -> Dictionary:
+	var out: Dictionary = {
+		"given": "Anon", "surname": "Unknown", "title": "Lord",
+		"age": 30, "gender": "male",
+	}
+	if raw is Dictionary:
+		for k in raw.keys():
+			out[k] = raw[k]
+		out["given"] = str(out.get("given", "Anon"))
+		out["surname"] = str(out.get("surname", "Unknown"))
+		out["title"] = str(out.get("title", "Lord"))
+		out["gender"] = str(out.get("gender", "male"))
+		out["age"] = int(out.get("age", 30))
+	elif raw is String and not (raw as String).is_empty():
+		var parts: PackedStringArray = (raw as String).strip_edges().split(" ", false)
+		if parts.size() == 1:
+			out["surname"] = parts[0]
+		elif parts.size() >= 2:
+			out["given"] = parts[0]
+			out["surname"] = " ".join(parts.slice(1))
+	return out
+
+
+# Generate spouse + children + parent + maybe sibling for `holder_id`.
+# Names sampled deterministically from DesignData.name_pools by hashing the
+# holder's surname + role, so the same holder always gets the same family.
+#
+# Args:
+#   holder_id (int): characters.id of the head-of-family.
+#   surname (String): holder's surname — used for kids and dad (same family).
+#   gender (String): "male"|"female" — spouse picks the opposite.
+#   age (int): holder's age — drives children/parent ages.
+func _seed_close_family(holder_id: int, surname: String, gender: String, age: int) -> void:
+	var pools: Dictionary = DesignData.name_pools if "name_pools" in DesignData else {}
+	if pools.is_empty():
+		return
+	var male_pool_by_country: Dictionary = pools.get("male", {})
+	var female_pool_by_country: Dictionary = pools.get("female", {})
+	var surname_pool_by_country: Dictionary = pools.get("surnames", {})
+	# Pick a name region by surname pattern.
+	var region: String = _region_for_surname(surname)
+	var male_names: Array = male_pool_by_country.get(region, male_pool_by_country.get("E", []))
+	var female_names: Array = female_pool_by_country.get(region, female_pool_by_country.get("E", []))
+	var foreign_surnames: Array = surname_pool_by_country.get(region, surname_pool_by_country.get("E", []))
+
+	var seed_key := surname + "#" + str(holder_id)
+
+	# ── SPOUSE ──
+	var spouse_gender: String = "female" if gender == "male" else "male"
+	var spouse_pool: Array = female_names if spouse_gender == "female" else male_names
+	var spouse_given: String = spouse_pool[_hash_int(seed_key, 1) % max(1, spouse_pool.size())]
+	# Spouse keeps a maiden surname from a DIFFERENT family — pick from the pool.
+	var spouse_surname: String = foreign_surnames[_hash_int(seed_key, 2) % max(1, foreign_surnames.size())]
+	# In case of accidental match with holder's surname, nudge.
+	if spouse_surname == surname:
+		spouse_surname = foreign_surnames[(_hash_int(seed_key, 2) + 1) % max(1, foreign_surnames.size())]
+	var spouse_age: int = clampi(age + ((_hash_int(seed_key, 3) % 11) - 5), 18, 75)
+	var spouse_family_id: int = _ensure_family(spouse_surname, 45)
+	var spouse_id: int = _insert_character(spouse_given, spouse_family_id,
+			"Lady" if spouse_gender == "female" else "Lord",
+			spouse_age, spouse_gender)
+	_link_pair(holder_id, spouse_id, "spouse")
+
+	# ── PARENT (deceased, holder's father — anchors patriline) ──
+	var dad_given: String = male_names[_hash_int(seed_key, 4) % max(1, male_names.size())]
+	var dad_family_id: int = _ensure_family(surname, 50)
+	var dad_age: int = age + 25 + (_hash_int(seed_key, 5) % 10)
+	var dad_id: int = _insert_character(dad_given, dad_family_id, "Lord", dad_age, "male", false)
+	_link_pair(dad_id, holder_id, "child")  # dad is parent of holder
+
+	# ── CHILDREN ──
+	# 1..3 children. Each shares holder's family. Eldest age = age - 22 down to 5.
+	var child_count: int = 1 + (_hash_int(seed_key, 6) % 3)
+	var holder_family_id: int = _ensure_family(surname)
+	var youngest_age: int = max(2, age - 25)
+	for i in range(child_count):
+		var child_gender: String = "male" if (_hash_int(seed_key, 10 + i) % 2 == 0) else "female"
+		var pool: Array = male_names if child_gender == "male" else female_names
+		var cgiven: String = pool[_hash_int(seed_key, 20 + i) % max(1, pool.size())]
+		var cage: int = clampi(youngest_age + i * 3, 2, max(3, age - 18))
+		var title: String = "Heir" if i == 0 and child_gender == "male" else (
+				"Lord" if child_gender == "male" else "Lady")
+		var cid: int = _insert_character(cgiven, holder_family_id, title, cage, child_gender)
+		_link_pair(holder_id, cid, "child")
+		# Spouse is also a parent.
+		_link_pair(spouse_id, cid, "child")
+
+	# ── SIBLING (50%) ──
+	if (_hash_int(seed_key, 30) % 2) == 0:
+		var sib_gender: String = "male" if (_hash_int(seed_key, 31) % 2 == 0) else "female"
+		var sib_pool: Array = male_names if sib_gender == "male" else female_names
+		var sib_given: String = sib_pool[_hash_int(seed_key, 32) % max(1, sib_pool.size())]
+		var sib_age: int = clampi(age + ((_hash_int(seed_key, 33) % 13) - 6), 16, 70)
+		var sib_id: int = _insert_character(sib_given, holder_family_id, "Lord" if sib_gender == "male" else "Lady", sib_age, sib_gender)
+		_link_pair(holder_id, sib_id, "sibling")
+		# Same dad too.
+		_link_pair(dad_id, sib_id, "child")
+
+
+# Best-guess country letter from a surname so we sample given-names from the
+# matching pool. "ap X" → Welsh, "Mac/Mc/of X (Scot.)" → Scottish, else English.
+func _region_for_surname(surname: String) -> String:
+	var s := surname.to_lower()
+	if s.begins_with("ap ") or s.begins_with("ferch "):
+		return "W"
+	if s.begins_with("mac") or s.begins_with("mc"):
+		return "S"
+	# Some Scottish surnames are bare clan names — match the ones we know.
+	for clan in ["comyn", "bruce", "stewart", "fraser", "graham", "lindsay",
+			"sinclair", "sutherland", "macduff", "campbell", "douglas",
+			"hamilton", "ramsay", "maxwell", "wallace", "dunkeld", "balliol",
+			"of ross", "of lorn", "of lennox", "of mar", "of buchan",
+			"of strathearn", "of atholl"]:
+		if s == clan or s.ends_with(clan):
+			return "S"
+	return "E"
+
+
+func _count(table: String) -> int:
+	db.query("SELECT COUNT(*) AS c FROM %s;" % table)
 	if db.query_result.is_empty():
 		return 0
 	return int(db.query_result[0]["c"])
-
-
-# Public: look up the head-of-family currently holding a region.
-#
-# Args:
-#   region_type (String): "country" | "duchy" | "county" | "barony".
-#   region_id (String): country id, duchy id, county name, or LAD13CD.
-# Returns:
-#   Dictionary: {given_name, surname, title, age, character_id, family_id,
-#                prestige} or {} if no holder is recorded.
-func holder_of(region_type: String, region_id: String) -> Dictionary:
-	db.query_with_bindings("""
-		SELECT c.id AS character_id, c.given_name, c.title, c.age,
-		       f.id AS family_id, f.surname, f.prestige
-		FROM holdings h
-		JOIN characters c ON c.id = h.holder_character_id
-		JOIN families   f ON f.id = h.holder_family_id
-		WHERE h.region_type = ? AND h.region_id = ?
-		LIMIT 1;""",
-		[region_type, region_id]
-	)
-	if db.query_result.is_empty():
-		return {}
-	return db.query_result[0].duplicate()

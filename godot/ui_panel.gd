@@ -8,6 +8,12 @@ extends CanvasLayer
 
 @onready var info_panel: Panel       = $Control/InfoPanel
 @onready var vbox: VBoxContainer     = $Control/InfoPanel/VBoxContainer
+@onready var character_panel: Panel  = $Control/CharacterPanel
+@onready var family_tree_panel: Panel = $Control/FamilyTreePanel
+
+# Emitted when the holder name in the InfoPanel is clicked. Listeners get the
+# character_id so they can open the character overview.
+signal holder_clicked(character_id: int)
 
 # Big colour values for headers per region tier — gives each tier a distinct
 # visual identity in the panel header.
@@ -86,9 +92,8 @@ func _build_barony(d: Dictionary) -> void:
 	_add_kv("Garrison",      "%s troops" % _fmt_thousands(int(d.get("garrison", 0))))
 
 
-# Render the current holder + house, plus the holder's age. Skips if the
-# holder dict is empty (e.g. v2 saves loaded under a v3 schema before the
-# political seed has run).
+# Render the current holder + house, plus the holder's age. The holder name
+# is a flat Button so clicking it opens the character overview.
 func _add_holder_row(h: Dictionary) -> void:
 	if h.is_empty():
 		return
@@ -98,11 +103,42 @@ func _add_holder_row(h: Dictionary) -> void:
 	var full_name: String = (given + " " + surname).strip_edges()
 	if full_name == "":
 		full_name = "Unknown"
-	_add_kv(title, full_name)
+	var character_id: int = int(h.get("character_id", 0))
+	_add_clickable_kv(title, full_name, character_id)
 	if surname != "":
 		_add_kv("House", surname)
 	if int(h.get("age", 0)) > 0:
 		_add_kv("Age", str(int(h.get("age"))))
+
+
+# Variant of _add_kv where the VALUE is a flat Button — clicking it emits
+# `holder_clicked(character_id)` so the rest of the UI can open the character
+# overview. Skips the button (falls back to a plain label) when character_id
+# is 0, which happens for regions with no recorded holder.
+func _add_clickable_kv(key: String, value: String, character_id: int) -> void:
+	if character_id <= 0:
+		_add_kv(key, value)
+		return
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 12)
+	vbox.add_child(row)
+
+	var k := Label.new()
+	k.text = key
+	k.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	k.add_theme_font_size_override("font_size", 12)
+	k.add_theme_color_override("font_color", Color(0.65, 0.60, 0.50))
+	row.add_child(k)
+
+	var btn := Button.new()
+	btn.text = value
+	btn.flat = true
+	btn.add_theme_font_size_override("font_size", 13)
+	btn.add_theme_color_override("font_color", Color(0.95, 0.92, 0.80))
+	btn.add_theme_color_override("font_hover_color", Color(1.0, 0.97, 0.55))
+	btn.alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	btn.pressed.connect(func(): holder_clicked.emit(character_id))
+	row.add_child(btn)
 
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
