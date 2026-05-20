@@ -133,6 +133,31 @@ FACTION_SEED = [
     {"id": "scotland", "name": "Kingdom of Scotland",  "color_hex": "#005eb8", "treasury": 900},
 ]
 
+# ── BARONY OVERRIDES (per-LAD economy where we know the real figures) ───────
+# Default behaviour is pro-rata: each barony in a county gets county_value/N.
+# Where we have better-than-default data — major cities, ports, monastic
+# holdings — we override here by LAD13CD. Add freely; rerun extract_design.py.
+#
+# Fields:
+#   income, garrison, population — same semantics as county-level.
+#   name (optional) — overrides LAD13NM for the in-game label.
+BARONY_OVERRIDES = {
+    # London — the City of London + Westminster wards, the wealthiest LADs.
+    # E09000001 = City of London proper; bumping its slice well above pro-rata.
+    "E09000001": {"name": "London", "income": 220, "garrison": 180, "population": 25000},
+    # York (Yorkshire) — second city of England.
+    "E06000014": {"name": "York", "income": 110, "garrison": 80, "population": 12000},
+    # Bristol — major port.
+    "E06000023": {"name": "Bristol", "income": 85, "garrison": 60, "population": 8000},
+    # Norwich (Norfolk).
+    "E07000148": {"name": "Norwich", "income": 90, "garrison": 70, "population": 10000},
+    # Cardiff (Welsh march, Glamorgan).
+    "W06000015": {"name": "Cardiff", "income": 50, "garrison": 70, "population": 4500},
+    # Edinburgh (Lothian).
+    "S12000036": {"name": "Edinburgh", "income": 80, "garrison": 90, "population": 8000},
+}
+
+
 # ── COUNTRY mapping (geographic, used for label tier + aggregation) ──────────
 COUNTRY_BY_DUCHY = {
     "lancaster":  "England", "chester":    "England", "march":      "England",
@@ -162,6 +187,7 @@ def main():
         "faction_seed":          FACTION_SEED,
         "country_by_duchy":      COUNTRY_BY_DUCHY,
         "factions_by_duchy":     FACTIONS_BY_DUCHY,
+        "barony_overrides":      BARONY_OVERRIDES,
     }
     os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
     with open(OUTPUT_PATH, "w", encoding="utf-8") as f:

@@ -19,6 +19,7 @@ var default_harvest_params: Array = []
 var faction_seed: Array = []
 var country_by_duchy: Dictionary = {}
 var factions_by_duchy: Dictionary = {}
+var barony_overrides: Dictionary = {}      # LAD13CD → {income, garrison, population, name?}
 
 var loaded: bool = false
 
@@ -46,8 +47,11 @@ func _load() -> void:
 	faction_seed           = d.get("faction_seed", [])
 	country_by_duchy       = d.get("country_by_duchy", {})
 	factions_by_duchy      = d.get("factions_by_duchy", {})
+	barony_overrides       = d.get("barony_overrides", {})
 	loaded = true
-	print("DesignData: loaded %d counties, %d duchies" % [counties.size(), duchies.size()])
+	print("DesignData: loaded %d counties, %d duchies, %d barony overrides" % [
+		counties.size(), duchies.size(), barony_overrides.size()
+	])
 
 
 # Convenience accessors.
@@ -57,3 +61,26 @@ func county(cn: String) -> Dictionary:
 
 func duchy(did: String) -> Dictionary:
 	return duchies.get(did, {})
+
+
+# Per-barony economy. Returns the override entry if we have one for that LAD,
+# otherwise a pro-rata slice of the parent county's income/garrison/pop split
+# equally across the county's barony count.
+#
+# Args:
+#   lad_code (String): LAD13CD identifier (e.g. "E08000034").
+#   county_name (String): parent county name (for the pro-rata fallback).
+#   barony_count (int): number of baronies in that county (denominator).
+# Returns:
+#   Dictionary: {income, garrison, population, (name)}
+func barony_economy(lad_code: String, county_name: String, barony_count: int) -> Dictionary:
+	if barony_overrides.has(lad_code):
+		return barony_overrides[lad_code].duplicate()
+	var co: Dictionary = counties.get(county_name, {})
+	var n: int = maxi(1, barony_count)
+	@warning_ignore("integer_division")
+	return {
+		"income":     int(co.get("income", 0))     / n,
+		"garrison":   int(co.get("garrison", 0))   / n,
+		"population": int(co.get("population", 0)) / n,
+	}

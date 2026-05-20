@@ -30,8 +30,10 @@ func _ready() -> void:
 # Settings button → toggle the SettingsPanel, which now also hosts Save Game
 # and Quit-to-Main-Menu. Mirrors what the O keyboard shortcut does.
 func _on_settings_pressed() -> void:
-	# Settings panel lives on the same UI/Control as TopBar — sibling lookup.
-	var panel := get_node_or_null("../../SettingsPanel")
+	# TopBar lives at UI/Control/TopBar; the SettingsPanel is at
+	# UI/Control/SettingsPanel, so we just walk one level up and pick the
+	# sibling. The earlier ../../ was off by one level.
+	var panel := get_node_or_null("../SettingsPanel")
 	if panel != null:
 		panel.visible = not panel.visible
 
@@ -45,6 +47,7 @@ func refresh() -> void:
 	# Re-derive year and season from the turn number so this matches whatever
 	# advance_turn() wrote (and so the bar stays correct after a save reload).
 	var idx: int = maxi(turn - 1, 0)                  # 0-indexed from turn 1
+	@warning_ignore("integer_division")
 	var year: int = 1247 + (idx / 4)
 	var season: int = idx % 4
 

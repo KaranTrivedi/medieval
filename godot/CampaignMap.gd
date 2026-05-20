@@ -30,7 +30,7 @@ const SELECTED_BARONY_PX_MULT := 3.5     # 3.5× the normal hairline width
 # Camera tunables.
 const ZOOM_STEP := 1.15            # multiplicative factor per wheel notch
 const ZOOM_MIN  := 0.03            # most zoomed-out allowed (whole island visible)
-const ZOOM_MAX  := 4.0             # most zoomed-in allowed (single barony)
+const ZOOM_MAX  := 24.0            # most zoomed-in — deep enough for barony/fief detail
 const PAN_KEY_PIXELS_PER_SEC := 800.0  # WASD/arrow speed measured in SCREEN pixels
 
 # Distance in screen pixels a left-mouse press must move before we treat it

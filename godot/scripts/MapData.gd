@@ -210,16 +210,25 @@ func aggregate_country(country: String) -> Dictionary:
 	return out
 
 
-# Per-barony pro-rata share of its county's economy. Equal split for now.
-# Once we wire real per-LAD economy data this returns those values directly.
+# Per-barony economy. Routes through DesignData which returns explicit
+# per-LAD overrides when they exist (London, York, Bristol, Norwich,
+# Cardiff, Edinburgh today — add more in extract_design.py) or a pro-rata
+# share of the parent county otherwise.
+#
 # Args:
-#   county_name (String), barony_id (String): identifiers of the target barony.
+#   county_name (String): parent county name.
+#   barony_id (String): LAD13CD of the target barony.
 # Returns:
-#   Dictionary: {income, population, garrison}
-func aggregate_barony(county_name: String, _barony_id: String) -> Dictionary:
+#   Dictionary: {income, garrison, population, (name?)}
+func aggregate_barony(county_name: String, barony_id: String) -> Dictionary:
 	var co: Dictionary = counties.get(county_name, {})
 	var bs: Array = co.get("baronies", [])
+	var dd: Node = get_node_or_null("/root/DesignData")
+	if dd != null and dd.has_method("barony_economy"):
+		return dd.barony_economy(barony_id, county_name, bs.size())
+	# Fallback if DesignData isn't loaded for some reason.
 	var n: int = maxi(1, bs.size())
+	@warning_ignore("integer_division")
 	return {
 		"income":     int(co.get("income", 0))     / n,
 		"garrison":   int(co.get("garrison", 0))   / n,

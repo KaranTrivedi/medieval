@@ -132,22 +132,19 @@ func _populate_counties(parent_item: TreeItem, duchy_id: String) -> void:
 
 
 func _populate_baronies(parent_item: TreeItem, baronies: Array) -> void:
-	# Pull pro-rata share from the parent county for now; once per-barony
-	# economy is authored, swap to b.get("income") etc.
-	var n: int = maxi(1, baronies.size())
-	# Reach back into the parent county via the parent item's name. Cheap
-	# alternative would be passing county_name as an arg.
+	# Per-barony numbers come from DesignData.barony_economy (via MapData),
+	# which returns an explicit override for known LADs (London, York, …)
+	# or a pro-rata county slice for the rest.
 	var parent_county_name: String = parent_item.get_text(COL_NAME)
-	var co: Dictionary = MapData.counties.get(parent_county_name, {})
-	var county_pop: int = int(co.get("population", 0))
-	var county_income: int = int(co.get("income", 0))
-	var pro_pop: int = county_pop / n
-	var pro_inc: int = county_income / n
 	for b in baronies:
+		var b_id: String = str(b.get("id", ""))
+		var econ: Dictionary = MapData.aggregate_barony(parent_county_name, b_id)
+		# Use override name if present, else the data file's LAD13NM.
+		var display_name: String = str(econ.get("name", b.get("name", b_id)))
 		var b_item: TreeItem = tree.create_item(parent_item)
-		b_item.set_text(COL_NAME, str(b.get("name", b.get("id", ""))))
-		b_item.set_text(COL_POPULATION, _fmt(pro_pop))
-		b_item.set_text(COL_INCOME, _fmt(pro_inc))
+		b_item.set_text(COL_NAME, display_name)
+		b_item.set_text(COL_POPULATION, _fmt(int(econ.get("population", 0))))
+		b_item.set_text(COL_INCOME, _fmt(int(econ.get("income", 0))))
 		# Reserved for future fief / city / resource expansion.
 		b_item.set_text(COL_CHILDREN, "—")
 
@@ -164,9 +161,9 @@ func _barony_total() -> int:
 # but kept local to avoid coupling the two scripts.
 func _fmt(v) -> String:
 	var s := str(int(v))
-	var sign := ""
+	var sign_prefix := ""
 	if s.begins_with("-"):
-		sign = "-"
+		sign_prefix = "-"
 		s = s.substr(1)
 	var out := ""
 	var count := 0
@@ -176,4 +173,4 @@ func _fmt(v) -> String:
 		if count == 3 and i > 0:
 			out = "," + out
 			count = 0
-	return sign + out
+	return sign_prefix + out
