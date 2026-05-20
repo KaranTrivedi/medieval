@@ -5,6 +5,9 @@
 - Write code with comments. Always explain functions in detail, including input and output data types.
 - After every prompt, add suggestions in case the user wants to make changes or improvements.
 
+## Design principles:
+Any prompt that is created/opened must be closeable/unseelctable with esc key.
+
 ## Useful skills for this project
 
 When the task matches, prefer invoking these skills over re-deriving the workflow inline:

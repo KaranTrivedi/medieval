@@ -31,6 +31,16 @@ func _ready() -> void:
 	visible = false
 
 
+# Esc closes the panel when it's the active prompt.
+func _input(event: InputEvent) -> void:
+	if not visible:
+		return
+	if event is InputEventKey and event.pressed and not event.echo:
+		if (event as InputEventKey).keycode == KEY_ESCAPE:
+			close()
+			accept_event()
+
+
 func show_for(character_id: int) -> void:
 	_focus_id = character_id
 	_rebuild()
@@ -212,11 +222,11 @@ func _caption(text: String) -> Label:
 	return l
 
 
-func _text_label(text: String, size: int) -> Label:
+func _text_label(text: String, font_size: int) -> Label:
 	var l := Label.new()
 	l.text = text
 	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	l.add_theme_font_size_override("font_size", size)
+	l.add_theme_font_size_override("font_size", font_size)
 	l.add_theme_color_override("font_color", Color(0.85, 0.80, 0.65))
 	return l
 

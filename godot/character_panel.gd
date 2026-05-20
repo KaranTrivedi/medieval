@@ -42,6 +42,18 @@ func _ready() -> void:
 	visible = false
 
 
+# Esc closes the panel when it's the active prompt. Uses _input + accept_event
+# so the keypress is consumed before CampaignMap._unhandled_input fires its
+# own ESC handler (which would otherwise clear the map selection too).
+func _input(event: InputEvent) -> void:
+	if not visible:
+		return
+	if event is InputEventKey and event.pressed and not event.echo:
+		if (event as InputEventKey).keycode == KEY_ESCAPE:
+			close()
+			accept_event()
+
+
 func show_for(character_id: int) -> void:
 	_shown_character_id = character_id
 	_rebuild()
@@ -66,8 +78,11 @@ func _rebuild() -> void:
 
 	_build_header(ch)
 	_build_stats(ch)
+	_build_offices(ch)
 	_build_holdings(ch)
 	_build_relations(ch)
+	_build_actions(ch)
+	_build_inbox(ch)
 	_build_footer(ch)
 
 
@@ -110,13 +125,29 @@ func _build_header(ch: Dictionary) -> void:
 	name_lbl.add_theme_color_override("font_outline_color", Color(0.05, 0.04, 0.01))
 	right.add_child(name_lbl)
 
+	# Title + "of House [Surname]" — the surname is a button that opens the
+	# family tree. Built as an HBoxContainer so the surname keeps its hover
+	# tint without underlining the whole "Duke of House" prefix.
+	var title_row := HBoxContainer.new()
+	title_row.add_theme_constant_override("separation", 4)
+	right.add_child(title_row)
 	var title_lbl := Label.new()
 	var title: String = str(ch.get("title", "Lord"))
 	var house: String = str(ch.get("surname", ""))
-	title_lbl.text = "%s of House %s" % [title, house] if house != "" else title
+	title_lbl.text = "%s of House" % title if house != "" else title
 	title_lbl.add_theme_font_size_override("font_size", 14)
 	title_lbl.add_theme_color_override("font_color", Color(0.75, 0.70, 0.55))
-	right.add_child(title_lbl)
+	title_row.add_child(title_lbl)
+	if house != "":
+		var house_btn := Button.new()
+		house_btn.text = house
+		house_btn.flat = true
+		house_btn.add_theme_font_size_override("font_size", 14)
+		house_btn.add_theme_color_override("font_color", Color(0.95, 0.85, 0.45))
+		house_btn.add_theme_color_override("font_hover_color", Color(1.0, 0.97, 0.55))
+		var cid_for_house: int = int(ch.get("character_id", 0))
+		house_btn.pressed.connect(func(): open_family_tree.emit(cid_for_house))
+		title_row.add_child(house_btn)
 
 	var meta_lbl := Label.new()
 	meta_lbl.text = "%s · %d years" % [str(ch.get("gender", "?")).capitalize(), int(ch.get("age", 0))]
@@ -245,6 +276,108 @@ func _relation_row(role: String, other: Dictionary) -> void:
 	row.add_child(name_btn)
 
 
+func _build_offices(ch: Dictionary) -> void:
+	var offices: Array = GameState.offices_of(int(ch.get("character_id", 0)))
+	if offices.is_empty():
+		return
+	_section_header("Offices")
+	for o in offices:
+		var lbl := Label.new()
+		lbl.text = "  · %s of %s — %s" % [
+			str(o.office_key).capitalize(),
+			str(o.region_id).capitalize() if str(o.region_type) == "country" else str(o.region_id),
+			str(o.region_type).capitalize(),
+		]
+		lbl.add_theme_font_size_override("font_size", 12)
+		lbl.add_theme_color_override("font_color", Color(0.85, 0.78, 0.55))
+		vbox.add_child(lbl)
+
+
+# Actions the PLAYER character can take against the character currently
+# being viewed. If the player is looking at themselves, shows self-actions.
+# Each action becomes a button; pressing it calls GameState.submit_action.
+func _build_actions(ch: Dictionary) -> void:
+	var player_cid: int = GameState.player_character_id()
+	var subject_cid: int = int(ch.get("character_id", 0))
+	if player_cid <= 0 or subject_cid <= 0:
+		return
+	if player_cid == subject_cid:
+		# Don't show actions on yourself for now — placeholder until
+		# self-actions (take vows, study, etc.) are designed.
+		return
+	var actions: Array = GameState.available_actions(player_cid, subject_cid)
+	# Show current opinion between actor and subject for context.
+	var op_yours: int = GameState.opinion_of(player_cid, subject_cid)
+	var op_theirs: int = GameState.opinion_of(subject_cid, player_cid)
+	_section_header("Diplomacy")
+	var op_row := Label.new()
+	op_row.text = "  your opinion: %+d   ·   their opinion: %+d" % [op_yours, op_theirs]
+	op_row.add_theme_font_size_override("font_size", 11)
+	op_row.add_theme_color_override("font_color", Color(0.65, 0.60, 0.50))
+	vbox.add_child(op_row)
+	if actions.is_empty():
+		var no_act := Label.new()
+		no_act.text = "  (no actions available — no liege/vassal link)"
+		no_act.add_theme_font_size_override("font_size", 11)
+		no_act.add_theme_color_override("font_color", Color(0.45, 0.40, 0.30))
+		vbox.add_child(no_act)
+		return
+	for a in actions:
+		var btn := Button.new()
+		btn.text = "  ▸  " + str(a.label)
+		btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		btn.tooltip_text = str(a.description)
+		var key: String = str(a.key)
+		btn.pressed.connect(func(): _on_action_pressed(key, subject_cid))
+		vbox.add_child(btn)
+
+
+# Incoming requests aimed at this character. Each pending row gets accept/
+# decline buttons; the resolution updates opinion in both directions.
+func _build_inbox(ch: Dictionary) -> void:
+	var cid: int = int(ch.get("character_id", 0))
+	var inbox: Array = GameState.pending_actions_for(cid)
+	if inbox.is_empty():
+		return
+	_section_header("Inbox")
+	for row in inbox:
+		var item := HBoxContainer.new()
+		item.add_theme_constant_override("separation", 6)
+		vbox.add_child(item)
+		var desc := Label.new()
+		var initiator: String = "%s %s" % [
+			str(row.get("initiator_given", "?")),
+			str(row.get("initiator_surname", "")),
+		]
+		desc.text = "  %s — %s" % [str(row.action_type), initiator.strip_edges()]
+		desc.add_theme_font_size_override("font_size", 12)
+		desc.add_theme_color_override("font_color", Color(0.85, 0.80, 0.65))
+		desc.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		item.add_child(desc)
+		var aid: int = int(row.id)
+		var accept := Button.new()
+		accept.text = "Accept"
+		accept.pressed.connect(func(): _resolve_inbox_item(aid, true))
+		item.add_child(accept)
+		var decline := Button.new()
+		decline.text = "Decline"
+		decline.pressed.connect(func(): _resolve_inbox_item(aid, false))
+		item.add_child(decline)
+
+
+func _on_action_pressed(action_key: String, subject_cid: int) -> void:
+	var actor: int = GameState.player_character_id()
+	GameState.submit_action(action_key, actor, subject_cid, {})
+	# Rebuild so the opinion + inbox sections refresh.
+	_rebuild()
+
+
+func _resolve_inbox_item(action_id: int, accept: bool) -> void:
+	GameState.resolve_action(action_id, accept, "")
+	_rebuild()
+
+
 func _build_footer(ch: Dictionary) -> void:
 	vbox.add_child(HSeparator.new())
 	var btn_row := HBoxContainer.new()
@@ -271,9 +404,9 @@ func _section_header(text: String) -> void:
 	vbox.add_child(sep)
 
 
-func _label(text: String, size: int, color: Color) -> void:
+func _label(text: String, font_size: int, color: Color) -> void:
 	var l := Label.new()
 	l.text = text
-	l.add_theme_font_size_override("font_size", size)
+	l.add_theme_font_size_override("font_size", font_size)
 	l.add_theme_color_override("font_color", color)
 	vbox.add_child(l)

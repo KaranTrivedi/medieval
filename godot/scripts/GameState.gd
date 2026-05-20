@@ -192,7 +192,8 @@ func advance_turn() -> int:
 	var prev := current_turn()
 	var next := prev + 1
 	var season := prev % 4
-	var year := 1247 + int(prev / 4)
+	@warning_ignore("integer_division")
+	var year := 1247 + prev / 4   # 4 seasons per year
 	db.query_with_bindings(
 		"INSERT INTO turns(turn_number, year, season, active_faction_id, processed_at) VALUES(?,?,?,?,?);",
 		[next, year, season, player_faction_id, Time.get_datetime_string_from_system()]
@@ -356,6 +357,361 @@ func holdings_of(character_id: int) -> Array:
 	return out
 
 
+# ── HIERARCHY ─────────────────────────────────────────────────────────────────
+# Geographic / political tier walking. country > duchy > county > barony.
+# The parent of a barony is the county it sits in; of a county, its duchy;
+# of a duchy, its country. Sources are MapData (county.duchy, county.baronies,
+# COUNTRY_BY_DUCHY).
+
+# Region one tier above this region. Returns {region_type, region_id} or {}.
+func parent_region(region_type: String, region_id: String) -> Dictionary:
+	match region_type:
+		"barony":
+			# Walk MapData.counties — each county has a baronies array.
+			for cn in MapData.counties:
+				for b in MapData.counties[cn].get("baronies", []):
+					if str(b.get("id", "")) == region_id:
+						return {"region_type": "county", "region_id": cn}
+			return {}
+		"county":
+			var did: String = str(MapData.counties.get(region_id, {}).get("duchy", ""))
+			if did == "":
+				return {}
+			return {"region_type": "duchy", "region_id": did}
+		"duchy":
+			var country: String = str(MapData.COUNTRY_BY_DUCHY.get(region_id, ""))
+			if country == "":
+				return {}
+			return {"region_type": "country", "region_id": country.to_lower()}
+	return {}
+
+
+# Regions one tier BELOW this region. country→duchies, duchy→counties, etc.
+func child_regions(region_type: String, region_id: String) -> Array:
+	var out: Array = []
+	match region_type:
+		"country":
+			for did in MapData.duchies:
+				if str(MapData.COUNTRY_BY_DUCHY.get(did, "")).to_lower() == region_id.to_lower():
+					out.append({"region_type": "duchy", "region_id": did})
+		"duchy":
+			for cn in MapData.counties:
+				if str(MapData.counties[cn].get("duchy", "")) == region_id:
+					out.append({"region_type": "county", "region_id": cn})
+		"county":
+			for b in MapData.counties.get(region_id, {}).get("baronies", []):
+				out.append({"region_type": "barony", "region_id": str(b.get("id", ""))})
+	return out
+
+
+# The character holding the region one tier above this character's PRIMARY
+# holding (first in the country>duchy>county>barony ordering). For a baron,
+# that's the earl of his county; for an earl, the duke of his duchy; etc.
+#
+# Args:
+#   character_id (int)
+# Returns:
+#   Dictionary: holder row + region context, or {} if none.
+func liege_of(character_id: int) -> Dictionary:
+	var holds: Array = holdings_of(character_id)
+	if holds.is_empty():
+		return {}
+	var primary: Dictionary = holds[0]
+	var parent: Dictionary = parent_region(primary.region_type, primary.region_id)
+	if parent.is_empty():
+		return {}
+	var h: Dictionary = holder_of(parent.region_type, parent.region_id)
+	if h.is_empty():
+		return {}
+	h["region_type"] = parent.region_type
+	h["region_id"] = parent.region_id
+	return h
+
+
+# Characters holding the regions one tier BELOW each region this character
+# holds. Returns an array of holder rows annotated with the region they hold.
+func vassals_of(character_id: int) -> Array:
+	var out: Array = []
+	for h in holdings_of(character_id):
+		for child in child_regions(h.region_type, h.region_id):
+			var holder: Dictionary = holder_of(child.region_type, child.region_id)
+			if holder.is_empty():
+				continue
+			holder["region_type"] = child.region_type
+			holder["region_id"] = child.region_id
+			out.append(holder)
+	return out
+
+
+# ── OPINIONS ──────────────────────────────────────────────────────────────────
+
+# Read political opinion of A toward B. Missing rows = 0 (neutral).
+func opinion_of(character_id: int, target_id: int) -> int:
+	if character_id <= 0 or target_id <= 0:
+		return 0
+	db.query_with_bindings(
+		"SELECT opinion FROM character_opinions WHERE character_id = ? AND target_id = ?;",
+		[character_id, target_id]
+	)
+	if db.query_result.is_empty():
+		return 0
+	return int(db.query_result[0]["opinion"])
+
+
+# Add `delta` to A's opinion of B. Creates the row if it doesn't exist.
+# Returns the new value. Emits state_changed.
+func adjust_opinion(character_id: int, target_id: int, delta: int) -> int:
+	if character_id == target_id:
+		return 0
+	var current: int = opinion_of(character_id, target_id)
+	var new_val: int = clampi(current + delta, -100, 100)
+	db.query_with_bindings("""
+		INSERT INTO character_opinions(character_id, target_id, opinion, last_changed_turn)
+		VALUES(?,?,?,?)
+		ON CONFLICT(character_id, target_id) DO UPDATE
+			SET opinion = excluded.opinion, last_changed_turn = excluded.last_changed_turn;""",
+		[character_id, target_id, new_val, current_turn()]
+	)
+	state_changed.emit()
+	return new_val
+
+
+# ── ACTIONS ───────────────────────────────────────────────────────────────────
+# Catalogue of action types. Each entry describes who can initiate it, who the
+# target is, and whether it resolves immediately or sits pending for the
+# target's reply. Effects on opinion are applied at resolution time.
+#
+# `direction` semantics:
+#   "up"        — initiator is a vassal acting on their liege
+#   "down"      — initiator is a liege acting on a vassal
+#   "peer"      — initiator and target are roughly co-equal (same tier)
+#   "self"      — only the initiator is involved (e.g. take a vow)
+#
+# `resolution`:
+#   "immediate" — applies effects right away, no pending row
+#   "reply"     — creates a pending action; target accepts/declines later
+const ACTION_CATALOG: Dictionary = {
+	"request_marriage": {
+		"label": "Request marriage alliance",
+		"direction": "up",
+		"resolution": "reply",
+		"description": "Ask your liege to approve a marriage between your families.",
+		"on_accept_opinion": +15,
+		"on_decline_opinion": -10,
+	},
+	"grant_aid": {
+		"label": "Grant aid",
+		"direction": "down",
+		"resolution": "immediate",
+		"description": "Send treasury support to a vassal in need.",
+		"on_accept_opinion": +20,
+	},
+	"appoint_office": {
+		"label": "Appoint to office",
+		"direction": "down",
+		"resolution": "immediate",
+		"description": "Place this vassal in one of your court offices.",
+		"on_accept_opinion": +10,
+	},
+	"swear_fealty": {
+		"label": "Swear fealty",
+		"direction": "up",
+		"resolution": "immediate",
+		"description": "Reaffirm your loyalty to your liege.",
+		"on_accept_opinion": +5,
+	},
+}
+
+
+# Which actions can `actor` take against `target`? Filters ACTION_CATALOG by
+# the actor↔target hierarchical relationship. If `target_id` is 0 we return
+# only "self" actions.
+#
+# Args:
+#   actor_id (int): the initiator (typically the player or whichever character
+#       the player is acting AS).
+#   target_id (int): the target character (0 for none).
+# Returns:
+#   Array of dicts: [{key, label, description, direction, ...}]
+func available_actions(actor_id: int, target_id: int = 0) -> Array:
+	var out: Array = []
+	if actor_id <= 0:
+		return out
+	var relation: String = _hierarchical_relation(actor_id, target_id)  # "up"|"down"|"peer"|"self"|""
+	for key in ACTION_CATALOG.keys():
+		var spec: Dictionary = ACTION_CATALOG[key]
+		if str(spec.direction) != relation:
+			continue
+		var entry: Dictionary = spec.duplicate()
+		entry["key"] = key
+		out.append(entry)
+	return out
+
+
+# Walks the hierarchy to classify how `target` relates to `actor`:
+#   self  — same character
+#   up    — target is the actor's liege
+#   down  — target is one of actor's vassals
+#   peer  — same tier, no liege/vassal relationship
+#   ""    — unrelated / unknown
+func _hierarchical_relation(actor_id: int, target_id: int) -> String:
+	if actor_id <= 0:
+		return ""
+	if target_id <= 0:
+		return "self"
+	if actor_id == target_id:
+		return "self"
+	var liege: Dictionary = liege_of(actor_id)
+	if not liege.is_empty() and int(liege.get("character_id", 0)) == target_id:
+		return "up"
+	for v in vassals_of(actor_id):
+		if int(v.get("character_id", 0)) == target_id:
+			return "down"
+	# Same-tier peer detection: do they hold regions at the same tier?
+	var a_holds: Array = holdings_of(actor_id)
+	var t_holds: Array = holdings_of(target_id)
+	if not a_holds.is_empty() and not t_holds.is_empty():
+		if str(a_holds[0].region_type) == str(t_holds[0].region_type):
+			return "peer"
+	return ""
+
+
+# Submit an action. Resolves immediately for `immediate` actions, otherwise
+# creates a pending row for the target to resolve later.
+#
+# Args:
+#   action_type (String): key from ACTION_CATALOG.
+#   actor_id (int)
+#   target_id (int): 0 for self-actions.
+#   payload (Dictionary): action-specific extras (e.g. for marriage:
+#       {"groom_id": int, "bride_id": int}).
+# Returns:
+#   Dictionary: {action_id, status, resolution_text}
+func submit_action(action_type: String, actor_id: int, target_id: int = 0,
+		payload: Dictionary = {}) -> Dictionary:
+	if not ACTION_CATALOG.has(action_type):
+		return {"status": "invalid", "resolution_text": "Unknown action " + action_type}
+	var spec: Dictionary = ACTION_CATALOG[action_type]
+	var payload_str: String = JSON.stringify(payload)
+	# SQLite addon needs an explicit `null` Variant for NULL columns; mixing
+	# int and null in a ternary trips the GDScript type checker, so branch.
+	var target_bind: Variant = null
+	if target_id > 0:
+		target_bind = target_id
+	db.query_with_bindings("""
+		INSERT INTO actions(action_type, initiator_id, target_id, payload_json, status, created_turn)
+		VALUES(?,?,?,?,?,?);""",
+		[action_type, actor_id, target_bind, payload_str, "pending", current_turn()]
+	)
+	var action_id: int = db.get_last_insert_rowid()
+	if str(spec.resolution) == "immediate":
+		return resolve_action(action_id, true)
+	state_changed.emit()
+	return {"action_id": action_id, "status": "pending",
+			"resolution_text": "Sent to %s for reply." % _short_name(target_id)}
+
+
+# Resolve a pending action. Applies opinion deltas and records resolution_text.
+# For most action types this is also the place to apply side-effects (e.g.
+# marriage actually creating spouse rows). Right now only opinion + status
+# are wired; mechanical side-effects per type land in follow-up work.
+func resolve_action(action_id: int, accept: bool, custom_text: String = "") -> Dictionary:
+	db.query_with_bindings("SELECT * FROM actions WHERE id = ?;", [action_id])
+	if db.query_result.is_empty():
+		return {"status": "invalid", "resolution_text": "Action not found"}
+	var row: Dictionary = db.query_result[0].duplicate()
+	if str(row.status) != "pending":
+		return {"status": str(row.status),
+				"resolution_text": "Already resolved"}
+	var spec: Dictionary = ACTION_CATALOG.get(str(row.action_type), {})
+	var actor: int = int(row.initiator_id)
+	var target: int = int(row.target_id) if row.target_id != null else 0
+	var new_status: String = "accepted" if accept else "declined"
+	var op_delta: int = int(spec.get("on_accept_opinion", 0)) if accept else int(spec.get("on_decline_opinion", 0))
+	# Opinion changes flow in BOTH directions: target's opinion of actor and
+	# actor's opinion of target. Accept boosts both; decline cools both.
+	if target > 0 and op_delta != 0:
+		adjust_opinion(actor, target, op_delta)
+		adjust_opinion(target, actor, op_delta)
+	var text: String = custom_text
+	if text.is_empty():
+		text = "%s %s by %s" % [str(row.action_type), new_status, _short_name(target)]
+	db.query_with_bindings("""
+		UPDATE actions SET status = ?, resolved_turn = ?, resolution_text = ?
+		WHERE id = ?;""",
+		[new_status, current_turn(), text, action_id]
+	)
+	state_changed.emit()
+	return {"action_id": action_id, "status": new_status, "resolution_text": text}
+
+
+# Actions awaiting `character_id`'s reply (i.e. they're the target of a
+# pending action). Used to drive the "inbox" on the character sheet.
+func pending_actions_for(character_id: int) -> Array:
+	db.query_with_bindings("""
+		SELECT a.*, c.given_name AS initiator_given, f.surname AS initiator_surname
+		FROM actions a
+		JOIN characters c ON c.id = a.initiator_id
+		LEFT JOIN families f ON f.id = c.family_id
+		WHERE a.target_id = ? AND a.status = 'pending'
+		ORDER BY a.created_turn DESC;""",
+		[character_id]
+	)
+	var out: Array = []
+	for row in db.query_result:
+		out.append(row.duplicate())
+	return out
+
+
+# Recent actions initiated by `character_id`. Used to show the player what
+# they've recently done (and whether responses have come back).
+func actions_by(character_id: int, limit: int = 10) -> Array:
+	db.query_with_bindings("""
+		SELECT * FROM actions
+		WHERE initiator_id = ?
+		ORDER BY created_turn DESC, id DESC
+		LIMIT ?;""",
+		[character_id, limit]
+	)
+	var out: Array = []
+	for row in db.query_result:
+		out.append(row.duplicate())
+	return out
+
+
+# Offices currently held by a character. Returns rows shaped:
+#   {region_type, region_id, office_key, granted_turn}
+func offices_of(character_id: int) -> Array:
+	db.query_with_bindings("""
+		SELECT region_type, region_id, office_key, granted_turn
+		FROM offices
+		WHERE holder_character_id = ?
+		ORDER BY region_type, office_key;""",
+		[character_id]
+	)
+	var out: Array = []
+	for row in db.query_result:
+		out.append(row.duplicate())
+	return out
+
+
+# The player's current character — they ARE the head of their faction's
+# country tier. For england, that's King Henry; wales, Prince Llywelyn; etc.
+# Returns 0 if no holder is recorded (e.g. fresh DB pre-seed).
+func player_character_id() -> int:
+	var h: Dictionary = holder_of("country", player_faction_id)
+	return int(h.get("character_id", 0))
+
+
+func _short_name(character_id: int) -> String:
+	if character_id <= 0:
+		return "—"
+	var c: Dictionary = character(character_id)
+	if c.is_empty():
+		return "#%d" % character_id
+	return "%s %s" % [str(c.get("given_name", "")), str(c.get("surname", ""))]
+
+
 # ── INTERNAL ──────────────────────────────────────────────────────────────────
 
 func _open(path: String) -> void:
@@ -448,10 +804,55 @@ func _create_schema() -> void:
 			kind TEXT NOT NULL,
 			UNIQUE(character_id, related_id, kind)
 		);""")
+	# Political opinion between two characters. Default 0; positive = friendly,
+	# negative = hostile. NOT enforced symmetric — A may admire B even when B
+	# disdains A. Stored sparsely: a missing row means "default 0".
+	db.query("""
+		CREATE TABLE IF NOT EXISTS character_opinions (
+			character_id INTEGER NOT NULL REFERENCES characters(id),
+			target_id INTEGER NOT NULL REFERENCES characters(id),
+			opinion INTEGER NOT NULL DEFAULT 0,
+			last_changed_turn INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (character_id, target_id)
+		);""")
+	# Court offices held by characters. Each (region_type, region_id, office_key)
+	# is held by AT MOST one character. Office keys are tier-specific strings
+	# like 'marshal','steward','chancellor','spymaster','chaplain'.
+	db.query("""
+		CREATE TABLE IF NOT EXISTS offices (
+			region_type TEXT NOT NULL,
+			region_id TEXT NOT NULL,
+			office_key TEXT NOT NULL,
+			holder_character_id INTEGER REFERENCES characters(id),
+			granted_turn INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (region_type, region_id, office_key)
+		);""")
+	# Action queue. An action is created by one character, may be aimed at
+	# another, and may sit pending awaiting that target's response. Payload
+	# is opaque JSON so different action types can carry their own fields
+	# without schema churn.
+	db.query("""
+		CREATE TABLE IF NOT EXISTS actions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			action_type TEXT NOT NULL,
+			initiator_id INTEGER NOT NULL REFERENCES characters(id),
+			target_id INTEGER REFERENCES characters(id),
+			region_type TEXT,
+			region_id TEXT,
+			payload_json TEXT NOT NULL DEFAULT '{}',
+			status TEXT NOT NULL DEFAULT 'pending',
+			created_turn INTEGER NOT NULL DEFAULT 0,
+			resolved_turn INTEGER,
+			resolution_text TEXT
+		);""")
 	db.query("CREATE INDEX IF NOT EXISTS idx_characters_family ON characters(family_id);")
 	db.query("CREATE INDEX IF NOT EXISTS idx_holdings_holder ON holdings(holder_character_id);")
 	db.query("CREATE INDEX IF NOT EXISTS idx_rel_character ON relationships(character_id);")
 	db.query("CREATE INDEX IF NOT EXISTS idx_rel_related ON relationships(related_id);")
+	db.query("CREATE INDEX IF NOT EXISTS idx_opinions_char ON character_opinions(character_id);")
+	db.query("CREATE INDEX IF NOT EXISTS idx_offices_holder ON offices(holder_character_id);")
+	db.query("CREATE INDEX IF NOT EXISTS idx_actions_target ON actions(target_id, status);")
+	db.query("CREATE INDEX IF NOT EXISTS idx_actions_initiator ON actions(initiator_id);")
 
 
 # Seed the full game state from MapData + DesignData. INSERT OR IGNORE makes
@@ -469,7 +870,7 @@ func _seed() -> void:
 	for cname in MapData.counties:
 		var co: Dictionary = MapData.counties[cname]
 		var duchy: String = co.get("duchy", "")
-		var owner: String = factions_by_duchy.get(duchy, "england")
+		var owner_fid: String = factions_by_duchy.get(duchy, "england")
 		var garrison: int = int(co.get("garrison", 0))
 		var base_fertility: float = fertility_by_duchy.get(duchy, 1.0)
 		var fertility: float = clampf(
@@ -478,7 +879,7 @@ func _seed() -> void:
 		)
 		db.query_with_bindings(
 			"INSERT OR IGNORE INTO counties_state(county_id, owner_faction_id, garrison, fertility, updated_turn) VALUES(?,?,?,?,?);",
-			[cname, owner, garrison, fertility, 0]
+			[cname, owner_fid, garrison, fertility, 0]
 		)
 
 	# Seed harvest_params from DesignData.

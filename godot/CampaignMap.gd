@@ -119,11 +119,12 @@ func _on_open_family_tree(character_id: int) -> void:
 		p.show_for(character_id)
 
 
-# Clicking a chip in the family tree should also update the character panel
-# behind it so they stay in sync.
+# Clicking any chip in the family tree opens (or refocuses) the character
+# overview for that person. The tree itself also refocuses on the clicked
+# chip via its own internal handler, so both panels stay in sync.
 func _on_family_tree_navigate(character_id: int) -> void:
 	var p: Node = ui.get_node_or_null("Control/CharacterPanel")
-	if p != null and p.has_method("show_for") and p.visible:
+	if p != null and p.has_method("show_for"):
 		p.show_for(character_id)
 
 func build_map():
