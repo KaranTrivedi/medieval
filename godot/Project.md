@@ -672,8 +672,15 @@ Text sometimes gets mushed in small sections. Allow wrapping where possible, mak
 
 Also add in the chronicle tab, Information about end turns, whether there was a good harvest etc etc needs to be recorded with color codes in the logs.
 Need a table showing all baronaries , counties etc. in a cascading table. two tables needed, one by ownership, another by not owned. Show all related stats.
-Is there any way I can traverse the sqlite databases? I would like to be able the view the entries and tables etc.Also I added a sprite2D layer, I would like it to fit the background correctly. we can deal with that later if its too complicated.
+Also I added a sprite2D layer, I would like it to fit the background correctly. we can deal with that later if its too complicated.
 
+Suggested next slices for the intrigue layer:
+
+character_knowledge table (knower_id, target_id, fact_kind, fact_payload) so discoveries persist across turns and only the discoverer "knows" a hidden ambition.
+Spymaster's spy_on_court discovery roll — when invoked against a target, roll vs. their intrigue stat; on success, INSERT a knowledge row revealing one fact (ambition, opinion of a third party, hidden marriage plans).
+AI ambition driver in _advance_lifecycle — characters with attain_office who lack their target office periodically submit_action("appoint_office", liege=…, payload={office_key}) (currently the action is direct-resolve; gating on the liege's reply rolls them into the politics loop).
+block_appointment and prevent_marriage action types that, when accepted, register a one-year veto on the corresponding event for the target.
+Ambition reveal in the character panel when hidden=0 — small "Ambitions" section under the header showing the target office/region.
 
 **Out of scope for Phase 1:**
 - Family trees and bastards

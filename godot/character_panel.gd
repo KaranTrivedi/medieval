@@ -307,13 +307,17 @@ func _build_vassals(parent: Control, ch: Dictionary) -> void:
 		var row := HBoxContainer.new()
 		row.add_theme_constant_override("separation", 8)
 		parent.add_child(row)
-		# Region context (compact, dim).
+		# Region context (compact, dim). Route through _pretty_region so
+		# baronies show "Hartlepool" rather than "E06000001".
 		var region_lbl := UITheme.dim_label(
 			"%s · %s" % [
 				str(v.get("region_type", "")).capitalize(),
-				str(v.get("region_id", "")),
+				_pretty_region({
+					"region_type": str(v.get("region_type", "")),
+					"region_id": str(v.get("region_id", "")),
+				}),
 			], 11)
-		region_lbl.custom_minimum_size.x = 130
+		region_lbl.custom_minimum_size.x = 150
 		row.add_child(region_lbl)
 		var alive: bool = bool(v.get("alive", true))
 		var name_btn := Button.new()
@@ -643,11 +647,7 @@ func _pretty_region(r: Dictionary) -> String:
 			var d: Dictionary = MapData.duchies.get(rid, {})
 			return str(d.get("name", rid))
 		"county":  return rid
-		"barony":
-			var dd: Node = get_node_or_null("/root/DesignData")
-			if dd != null:
-				var b: Dictionary = dd.baronies.get(rid, {})
-				if "name" in b:
-					return "%s (%s)" % [str(b.name), rid]
-			return rid
+		# Single canonical helper for barony → human name; same one the
+		# Region panel uses, so Holdings + Vassals + RegionPanel all agree.
+		"barony":  return MapData.barony_name(rid)
 	return rid

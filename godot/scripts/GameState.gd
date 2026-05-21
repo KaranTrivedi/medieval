@@ -1939,15 +1939,19 @@ func eligible_office_candidates(region_type: String, region_id: String) -> Array
 	if holder.is_empty():
 		return []
 	var holder_id: int = int(holder.get("character_id", 0))
-	# Use a Dict to de-dupe by character_id while preserving the first
-	# relation_hint we encountered.
+	# Office's tier rank — used to gate candidates by their family standing.
+	# A baron's family (tier rank 3) cannot fill a duchy office (tier rank 1):
+	# the rule is family_tier_rank <= office_tier_rank ("can't hold a higher
+	# office than your station"). Lower number = higher rank in TIER_RANK.
+	var office_tier: int = int(TIER_RANK.get(region_type, NO_HOLDING_TIER))
+	var family_tiers: Dictionary = _compute_family_tiers()
 	var seen: Dictionary = {}
 	var out: Array = []
 
-	# 1. The lord's relatives.
+	# 1. The lord's relatives — pulls family_id so we can tier-gate.
 	db.query_with_bindings("""
 		SELECT r.kind AS relation_hint, c.id AS character_id, c.given_name,
-		       c.title, c.age, f.surname
+		       c.title, c.age, c.family_id, f.surname
 		FROM relationships r
 		JOIN characters c ON c.id = r.related_id
 		LEFT JOIN families f ON f.id = c.family_id
@@ -1965,10 +1969,12 @@ func eligible_office_candidates(region_type: String, region_id: String) -> Array
 			"surname": str(row["surname"]),
 			"title": str(row["title"]),
 			"age": int(row["age"]),
+			"family_id": int(row["family_id"]) if row["family_id"] != null else 0,
 			"relation_hint": str(row["relation_hint"]),
 		})
 
-	# 2. Holders of sub-regions (i.e. vassals of this lord).
+	# 2. Holders of sub-regions (vassals of this lord). We pull family_id
+	# explicitly since `vassals_of` already provides it.
 	for v in vassals_of(holder_id):
 		var cid: int = int(v.get("character_id", 0))
 		if cid <= 0 or seen.has(cid):
@@ -1980,10 +1986,21 @@ func eligible_office_candidates(region_type: String, region_id: String) -> Array
 			"surname": str(v.get("surname", "")),
 			"title": str(v.get("title", "Lord")),
 			"age": int(v.get("age", 0)),
+			"family_id": int(v.get("family_id", 0)),
 			"relation_hint": "vassal",
 		})
 
-	return out
+	# Tier gate. A candidate is eligible iff their family's highest-held
+	# tier rank is at or above (≤ in TIER_RANK numbers) the office's tier.
+	# A candidate whose family holds nothing has tier rank = NO_HOLDING_TIER
+	# (4) and is rejected for any office above barony.
+	var filtered: Array = []
+	for cand in out:
+		var fid: int = int(cand.get("family_id", 0))
+		var ftier: int = int(family_tiers.get(fid, NO_HOLDING_TIER))
+		if ftier <= office_tier:
+			filtered.append(cand)
+	return filtered
 
 
 # ── AMBITIONS ────────────────────────────────────────────────────────────────

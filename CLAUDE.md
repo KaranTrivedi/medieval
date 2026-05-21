@@ -8,6 +8,26 @@
 ## Design principles:
 Any prompt that is created/opened must be closeable/unseelctable with esc key.
 
+## Context handoff across chats
+
+This project is too large to keep fully in one chat. `HANDOFF.md` at the repo root is the canonical record of state across resets.
+
+**At the start of every session**, read `HANDOFF.md` BEFORE doing anything else. It carries:
+- the design model the project is currently working with (schema, panel architecture, data flow)
+- WIP items that survived the last chat
+- recent decisions and the reasoning behind them
+- known issues / TODOs the user hasn't resolved yet
+- a "last touched" pointer indicating the most recent area of work
+
+**At the end of every session** (or whenever a non-trivial chunk of work concludes), update `HANDOFF.md`:
+- move newly-completed items out of WIP
+- record any new design decisions in a dated bullet
+- update the schema section if tables / columns changed
+- note open bugs the user reported that you didn't get to
+- keep the file under ~300 lines — collapse / summarise older history aggressively
+
+Treat `HANDOFF.md` like a captain's log, not an audit trail. Future-Claude needs the *current shape* of the system, not the genealogy of every edit. The git history is the audit trail.
+
 ## Useful skills for this project
 
 When the task matches, prefer invoking these skills over re-deriving the workflow inline:
