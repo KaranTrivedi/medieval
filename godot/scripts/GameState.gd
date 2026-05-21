@@ -61,14 +61,35 @@ func _ready() -> void:
 	if FileAccess.file_exists(WORKING_DB):
 		_open(WORKING_DB)
 		_create_schema()
-		# Heal-on-resume: a save created before offices existed needs the
-		# initial appointments back-filled. Idempotent — silent no-op when
-		# offices is already populated.
+		# Heal-on-resume passes — both are idempotent so they're safe to
+		# run every load.
 		_ensure_offices_seeded()
+		_ensure_ambitions_seeded()
 		print("GameState: resumed working save at ", WORKING_DB,
 				" (turn=", current_turn(), ")")
 	else:
 		new_game("england")
+
+
+# Back-fill ambitions for any pre-existing alive character that lacks one.
+# Brand-new characters get an ambition in _insert_character; this catches
+# saves that predate the feature so the player isn't stuck with a world
+# full of motivation-less NPCs.
+func _ensure_ambitions_seeded() -> void:
+	db.query("""
+		SELECT c.id FROM characters c
+		LEFT JOIN character_ambitions a ON a.character_id = c.id
+		WHERE c.alive = 1 AND a.id IS NULL;""")
+	var ids: Array = []
+	for row in db.query_result:
+		ids.append(int(row["id"]))
+	if ids.is_empty():
+		return
+	db.query("BEGIN;")
+	for cid in ids:
+		_generate_ambition(cid)
+	db.query("COMMIT;")
+	print("GameState: back-filled %d character ambitions" % ids.size())
 
 
 # If the offices table is empty but we have country-tier holdings, seed the
@@ -164,6 +185,13 @@ func current_turn() -> int:
 	if db.query_result.is_empty() or db.query_result[0]["t"] == null:
 		return 0
 	return int(db.query_result[0]["t"])
+
+
+# In-game year derived from the turn number. Each year = 4 turns; the game
+# starts in Spring 1247 on turn 1.
+func current_year() -> int:
+	@warning_ignore("integer_division")
+	return 1247 + max(current_turn() - 1, 0) / 4
 
 
 # Run one full end-of-turn step for the player faction. See the previous
@@ -1216,6 +1244,33 @@ func office_holder(region_type: String, region_id: String, office_key: String) -
 #   target_id (int): the target character (0 for none).
 # Returns:
 #   Array of dicts: [{key, label, description, direction, ...}]
+# All actions THIS character qualifies for, regardless of target. Used by
+# the character panel to show "Actions available to <name>" — the player
+# can see at a glance which privileges the character carries (especially
+# office-granted ones), without needing to also pick a target.
+#
+# Args:
+#   character_id (int): the actor.
+# Returns:
+#   Array of action descriptors (catalog entry + "key" field). Office-gated
+#   actions only appear when the character currently holds the required
+#   office at any tier.
+func actions_for(character_id: int) -> Array:
+	var out: Array = []
+	if character_id <= 0:
+		return out
+	var actor_offices: Dictionary = _office_keys_held_by(character_id)
+	for key in ACTION_CATALOG.keys():
+		var spec: Dictionary = ACTION_CATALOG[key]
+		if "requires_office" in spec:
+			if not actor_offices.has(str(spec.requires_office)):
+				continue
+		var entry: Dictionary = spec.duplicate()
+		entry["key"] = key
+		out.append(entry)
+	return out
+
+
 func available_actions(actor_id: int, target_id: int = 0) -> Array:
 	var out: Array = []
 	if actor_id <= 0:
@@ -1579,6 +1634,25 @@ func _create_schema() -> void:
 			resolved_turn INTEGER,
 			resolution_text TEXT
 		);""")
+	# Hidden character ambitions — every character has at most one. Kinds:
+	#   "attain_office"  — wants the named office_key at any region of its tier
+	#   "rule_region"    — wants to hold a specific region
+	#   "grow_prestige"  — wants to push their family's prestige higher
+	# `hidden = 1` until discovered via intrigue (Spymaster / Chaplain rolls
+	# are the planned reveal paths). Only the character's own holder and
+	# (eventually) the discoverer should see it.
+	db.query("""
+		CREATE TABLE IF NOT EXISTS character_ambitions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			character_id INTEGER NOT NULL UNIQUE REFERENCES characters(id),
+			kind TEXT NOT NULL,
+			target_office_key TEXT,
+			target_region_type TEXT,
+			target_region_id TEXT,
+			set_turn INTEGER NOT NULL DEFAULT 0,
+			hidden INTEGER NOT NULL DEFAULT 1
+		);""")
+	db.query("CREATE INDEX IF NOT EXISTS idx_ambitions_character ON character_ambitions(character_id);")
 	db.query("CREATE INDEX IF NOT EXISTS idx_characters_family ON characters(family_id);")
 	db.query("CREATE INDEX IF NOT EXISTS idx_holdings_holder ON holdings(holder_character_id);")
 	db.query("CREATE INDEX IF NOT EXISTS idx_rel_character ON relationships(character_id);")
@@ -1667,6 +1741,11 @@ func _insert_character(given: String, family_id: int, title: String, age: int,
 		# died sometime before the campaign begins. Place the event one year
 		# before the start so it's older than any subsequent log entry.
 		_log_lifecycle(cid, "death", 1246, {})
+	else:
+		# Living characters get a hidden ambition — the engine of intrigue.
+		# Deterministic per character via a stable hash so the same seed
+		# always produces the same ambitions across reruns.
+		_generate_ambition(cid)
 	return cid
 
 
@@ -1799,22 +1878,49 @@ func appoint_to_office(region_type: String, region_id: String,
 	if character_id <= 0:
 		vacate_office(region_type, region_id, office_key)
 		return
+	# If this slot already had a different holder, log a "dismissed" event
+	# for them so the prior officer's history records the loss.
+	var prior: Dictionary = office_holder(region_type, region_id, office_key)
+	if not prior.is_empty():
+		var prior_id: int = int(prior.get("character_id", 0))
+		if prior_id > 0 and prior_id != character_id:
+			_log_lifecycle(prior_id, "dismissed", current_year(), {
+				"office": office_key,
+				"region_type": region_type,
+				"region_id": region_id,
+			})
 	db.query_with_bindings("""
 		INSERT OR REPLACE INTO offices(region_type, region_id, office_key,
 				holder_character_id, granted_turn)
 		VALUES(?,?,?,?,?);""",
 		[region_type, region_id, office_key, character_id, current_turn()]
 	)
+	# Log the appointment on the new holder so their History tab shows it.
+	_log_lifecycle(character_id, "appointed", current_year(), {
+		"office": office_key,
+		"region_type": region_type,
+		"region_id": region_id,
+	})
 	state_changed.emit()
 
 
-# Remove the holder of an office slot, leaving it vacant.
+# Remove the holder of an office slot, leaving it vacant. Logs a "dismissed"
+# lifecycle event on the prior holder so their history reflects the loss.
 func vacate_office(region_type: String, region_id: String, office_key: String) -> void:
+	var prior: Dictionary = office_holder(region_type, region_id, office_key)
 	db.query_with_bindings("""
 		DELETE FROM offices
 		WHERE region_type = ? AND region_id = ? AND office_key = ?;""",
 		[region_type, region_id, office_key]
 	)
+	if not prior.is_empty():
+		var prior_id: int = int(prior.get("character_id", 0))
+		if prior_id > 0:
+			_log_lifecycle(prior_id, "dismissed", current_year(), {
+				"office": office_key,
+				"region_type": region_type,
+				"region_id": region_id,
+			})
 	state_changed.emit()
 
 
@@ -1878,6 +1984,84 @@ func eligible_office_candidates(region_type: String, region_id: String) -> Array
 		})
 
 	return out
+
+
+# ── AMBITIONS ────────────────────────────────────────────────────────────────
+# Every living character carries one hidden ambition that motivates their
+# AI behaviour and provides hooks for intrigue. Discovery / reveal flips
+# hidden→0 (planned: Spymaster + Chaplain office actions). For now we just
+# seed the data; AI driver and discovery rolls land in follow-up turns.
+
+const AMBITION_OFFICE_POOL := [
+	"marshal", "chancellor", "spymaster", "chaplain", "treasurer",
+	"constable", "seneschal", "herald", "justiciar",
+	"sheriff", "coroner", "bailiff", "castellan", "reeve", "forester",
+]
+
+
+# Deterministic ambition for a character. Picks one of three kinds and
+# stores it as hidden=1. Idempotent — INSERT OR IGNORE since the UNIQUE
+# constraint on character_id will reject duplicates.
+func _generate_ambition(character_id: int) -> void:
+	var roll: int = _hash_int("ambition", character_id) % 100
+	if roll < 60:
+		# 60% — attain a specific office at any tier. The actual target
+		# region is left null; AI will pick based on what's reachable.
+		var idx: int = _hash_int("ambition-office", character_id) % AMBITION_OFFICE_POOL.size()
+		var office_key: String = AMBITION_OFFICE_POOL[idx]
+		db.query_with_bindings("""
+			INSERT OR IGNORE INTO character_ambitions(
+				character_id, kind, target_office_key, set_turn, hidden)
+			VALUES(?, 'attain_office', ?, ?, 1);""",
+			[character_id, office_key, current_turn()]
+		)
+	elif roll < 85:
+		# 25% — grow family prestige. No targets; the AI driver will pick
+		# whichever prestige-bumping actions are affordable.
+		db.query_with_bindings("""
+			INSERT OR IGNORE INTO character_ambitions(
+				character_id, kind, set_turn, hidden)
+			VALUES(?, 'grow_prestige', ?, 1);""",
+			[character_id, current_turn()]
+		)
+	else:
+		# 15% — rule a specific region one tier up from the character's
+		# (currently unknown) station. At seed time we don't yet know the
+		# character's tier, so we drop just the kind for the AI driver to
+		# resolve target later.
+		db.query_with_bindings("""
+			INSERT OR IGNORE INTO character_ambitions(
+				character_id, kind, set_turn, hidden)
+			VALUES(?, 'rule_region', ?, 1);""",
+			[character_id, current_turn()]
+		)
+
+
+# Read a character's ambition. Returns {} when nothing is recorded, or
+# {kind, target_office_key, target_region_type, target_region_id, hidden}
+# when one exists. Callers respect `hidden` — UI shouldn't render the
+# specifics for hidden ambitions until intrigue reveals them.
+func ambition_of(character_id: int) -> Dictionary:
+	if character_id <= 0:
+		return {}
+	db.query_with_bindings("""
+		SELECT kind, target_office_key, target_region_type, target_region_id,
+		       set_turn, hidden
+		FROM character_ambitions
+		WHERE character_id = ?
+		LIMIT 1;""", [character_id])
+	if db.query_result.is_empty():
+		return {}
+	return db.query_result[0].duplicate()
+
+
+# Reveal a hidden ambition — used by intrigue discovery actions.
+func reveal_ambition(character_id: int) -> void:
+	db.query_with_bindings("""
+		UPDATE character_ambitions SET hidden = 0 WHERE character_id = ?;""",
+		[character_id]
+	)
+	state_changed.emit()
 
 
 # Legacy helper retained for completeness — generates a fresh adult male

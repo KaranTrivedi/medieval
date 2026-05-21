@@ -19,6 +19,8 @@ var _region_type: String = ""
 var _region_id: String = ""
 var _root: VBoxContainer
 var _tabs: TabContainer
+# Active tab preserved across rebuilds (clicks recreate the TabContainer).
+var _active_tab: int = 0
 # Which office slot is currently expanded for picking. Form "<key>" where
 # key matches GameState's office_key column. Empty = no picker showing.
 var _picking_office: String = ""
@@ -87,6 +89,11 @@ func _rebuild() -> void:
 	_tabs.set_tab_title(1, "Ownership")
 	_tabs.set_tab_title(2, "Offices")
 	_tabs.set_tab_title(3, "Subregions")
+	# Preserve the active tab across rebuilds — clicks (Appoint, Replace,
+	# nav back) recreate the TabContainer, which would otherwise reset
+	# the user back to the first tab every time.
+	_tabs.current_tab = clampi(_active_tab, 0, _tabs.get_tab_count() - 1)
+	_tabs.tab_changed.connect(func(idx): _active_tab = int(idx))
 
 
 func _build_header() -> Control:
@@ -108,8 +115,9 @@ func _build_header() -> Control:
 	name_lbl.add_theme_color_override("font_outline_color", Color(0.05, 0.04, 0.01))
 	name_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(name_lbl)
-	# Close button.
-	var close_btn := UITheme.styled_button("Close")
+	# Close button — same top-right slot as every other panel.
+	var close_btn := UITheme.styled_button("✕")
+	close_btn.tooltip_text = "Close (Esc)"
 	close_btn.pressed.connect(close)
 	row.add_child(close_btn)
 	return row

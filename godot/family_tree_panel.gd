@@ -74,8 +74,8 @@ func _rebuild() -> void:
 	var spacer := Control.new()
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	top.add_child(spacer)
-	var close_btn := Button.new()
-	close_btn.text = "Close"
+	var close_btn := UITheme.styled_button("✕")
+	close_btn.tooltip_text = "Close (Esc)"
 	close_btn.pressed.connect(close)
 	top.add_child(close_btn)
 	_root.add_child(HSeparator.new())

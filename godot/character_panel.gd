@@ -20,6 +20,10 @@ signal open_family_tree(character_id: int)
 var _root: VBoxContainer
 var _tabs: TabContainer
 var _shown_character_id: int = 0
+# Active tab is remembered across rebuilds. Without this, every click that
+# triggers _rebuild (e.g. an action button, the inbox accept/decline) would
+# snap the user back to the first tab because the TabContainer is recreated.
+var _active_tab: int = 0
 
 
 func _ready() -> void:
@@ -93,6 +97,10 @@ func _rebuild() -> void:
 	_tabs.set_tab_title(0, "Overview")
 	_tabs.set_tab_title(1, "History")
 	_tabs.set_tab_title(2, "Diplomacy")
+	# Restore the previously-active tab (defaults to 0 on first build).
+	# Clamp in case tab count changes between rebuilds.
+	_tabs.current_tab = clampi(_active_tab, 0, _tabs.get_tab_count() - 1)
+	_tabs.tab_changed.connect(func(idx): _active_tab = int(idx))
 
 	_build_footer(ch)
 
@@ -103,6 +111,9 @@ func _build_header(ch: Dictionary) -> void:
 	var top := HBoxContainer.new()
 	top.add_theme_constant_override("separation", 14)
 	_root.add_child(top)
+
+	# Header layout — portrait + info column expand; Close button is pinned
+	# to the top-right so it lands in the same spot on every panel.
 
 	# Portrait placeholder — initials over a parchment-dark square.
 	var portrait := ColorRect.new()
@@ -162,6 +173,16 @@ func _build_header(ch: Dictionary) -> void:
 		p.add_theme_color_override("font_color", UITheme.COL_INK_MUTED)
 		right.add_child(p)
 
+	# Close button — pinned to the header's top-right so the close affordance
+	# is in the same spot on every panel in the project.
+	var close_col := VBoxContainer.new()
+	close_col.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	top.add_child(close_col)
+	var close_btn := UITheme.styled_button("✕")
+	close_btn.tooltip_text = "Close (Esc)"
+	close_btn.pressed.connect(close)
+	close_col.add_child(close_btn)
+
 
 # Produce the line that follows the name. Format depends on whether the
 # character is the holder of any region:
@@ -206,14 +227,21 @@ func _build_title_row(ch: Dictionary) -> Control:
 # ── OVERVIEW TAB (two-column) ───────────────────────────────────────────────
 
 func _build_overview_tab(ch: Dictionary) -> Control:
+	# Wrap the whole Overview body in a ScrollContainer so a lord with many
+	# vassals (or any long section) doesn't push the footer's Family-tree
+	# button off the panel — that was the spill-out the user reported.
 	var col := VBoxContainer.new()
 	col.name = "Overview"
 	col.add_theme_constant_override("separation", 8)
+	var scroll := ScrollContainer.new()
+	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	col.add_child(scroll)
 	var split := HBoxContainer.new()
 	split.add_theme_constant_override("separation", 20)
 	split.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	split.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	col.add_child(split)
+	scroll.add_child(split)
 
 	# LEFT: Stats / Offices / Holdings / Vassals.
 	var left := VBoxContainer.new()
@@ -366,13 +394,17 @@ func _build_history_tab(ch: Dictionary) -> Control:
 		var year_lbl := UITheme.dim_label(str(int(e.get("year", 0))), 12)
 		year_lbl.custom_minimum_size.x = 60
 		row.add_child(year_lbl)
-		var kind_lbl := UITheme.text_label(_pretty_event(str(e.get("kind", ""))), 12)
+		var kind_lbl := UITheme.text_label(_pretty_event(
+			str(e.get("kind", "")), str(e.get("payload_json", "{}"))), 12)
 		row.add_child(kind_lbl)
 		list.add_child(row)
 	return col
 
 
-func _pretty_event(kind: String) -> String:
+# Render one lifecycle event line. Office-related events read payload_json
+# so the line reflects which office and where (e.g. "appointed Marshal of
+# England" rather than just "appointed").
+func _pretty_event(kind: String, payload_json: String = "{}") -> String:
 	match kind:
 		"birth":                return "born"
 		"coming_of_age":        return "came of age"
@@ -382,7 +414,24 @@ func _pretty_event(kind: String) -> String:
 		"inherited":            return "inherited a holding"
 		"inheritance_blocked":  return "inheritance blocked by liege"
 		"escheated":            return "received an escheated holding"
+		"appointed":            return "appointed " + _office_event_phrase(payload_json)
+		"dismissed":            return "dismissed " + _office_event_phrase(payload_json)
 	return kind
+
+
+# Turn a JSON payload of {office, region_type, region_id} into a readable
+# phrase like "Marshal of England" / "Sheriff of Yorkshire".
+func _office_event_phrase(payload_json: String) -> String:
+	var parser := JSON.new()
+	if parser.parse(payload_json) != OK:
+		return ""
+	var p: Dictionary = parser.get_data()
+	var office: String = str(GameState.OFFICE_LABELS.get(
+			str(p.get("office", "")), str(p.get("office", "")).capitalize()))
+	var rid: String = str(p.get("region_id", "")).capitalize() if str(p.get("region_type", "")) == "country" else str(p.get("region_id", ""))
+	if office == "" or rid == "":
+		return ""
+	return "%s of %s" % [office, rid]
 
 
 # ── DIPLOMACY TAB ───────────────────────────────────────────────────────────
@@ -404,9 +453,11 @@ func _build_diplomacy_tab(ch: Dictionary) -> Control:
 			"Your opinion: %+d         Their opinion of you: %+d" % [op_yours, op_theirs],
 			12, UITheme.COL_INK))
 
-	# Their available actions — what THIS character can do. Always shown, so
-	# the user can see the subject's privileges at a glance.
-	var their_actions: Array = GameState.available_actions(subject_cid, player_cid)
+	# Their available actions — every action this character qualifies for,
+	# filtered by office only (direction is not relevant when SHOWING the
+	# privilege list). Office-granted entries pick up the bordered tooltip
+	# treatment in _build_action_button.
+	var their_actions: Array = GameState.actions_for(subject_cid)
 	col.add_child(UITheme.section_header("Actions available to %s   (prestige %d)" % [
 		str(ch.get("given_name", "this character")), family_prestige]))
 	if their_actions.is_empty():
@@ -527,13 +578,11 @@ func _build_footer(ch: Dictionary) -> void:
 	var btn_row := HBoxContainer.new()
 	btn_row.add_theme_constant_override("separation", 8)
 	_root.add_child(btn_row)
+	# Close lives in the header (top-right). Footer keeps action-style buttons.
 	var tree_btn := UITheme.styled_button("🌳  Family tree")
 	tree_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	tree_btn.pressed.connect(func(): open_family_tree.emit(int(ch.get("character_id", 0))))
 	btn_row.add_child(tree_btn)
-	var close_btn := UITheme.styled_button("Close")
-	close_btn.pressed.connect(close)
-	btn_row.add_child(close_btn)
 
 
 # ── EVENT HANDLERS ──────────────────────────────────────────────────────────

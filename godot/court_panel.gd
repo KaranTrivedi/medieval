@@ -107,6 +107,12 @@ func _build_header() -> void:
 		monarch_btn.pressed.connect(func(): open_character_request.emit(cid))
 		row.add_child(monarch_btn)
 
+	# Close button pinned top-right of the header — consistent across panels.
+	var close_btn := UITheme.styled_button("✕")
+	close_btn.tooltip_text = "Close (Esc)"
+	close_btn.pressed.connect(close)
+	row.add_child(close_btn)
+
 
 func _build_offices_section() -> void:
 	_root.add_child(UITheme.section_header("Great Offices of the Realm"))
@@ -282,13 +288,6 @@ func _vassal_row(region_type: String, region_id: String) -> Control:
 
 
 func _build_footer() -> void:
-	_root.add_child(HSeparator.new())
-	var btn_row := HBoxContainer.new()
-	btn_row.add_theme_constant_override("separation", 8)
-	_root.add_child(btn_row)
-	var spacer := Control.new()
-	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	btn_row.add_child(spacer)
-	var close_btn := UITheme.styled_button("Close")
-	close_btn.pressed.connect(close)
-	btn_row.add_child(close_btn)
+	# Close is in the header (top-right); footer is currently empty until
+	# the player gets enough court-wide actions to justify it.
+	pass
