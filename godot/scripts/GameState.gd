@@ -73,18 +73,31 @@ func _ready() -> void:
 
 # If the offices table is empty but we have country-tier holdings, seed the
 # initial office appointments so resumed saves match fresh-game state.
+# Offices are now NEVER auto-filled — appointments are a lord's prerogative.
+# This sweep removes any rows left over from earlier builds that auto-seeded
+# courtiers + wipes legacy office_key values that no longer exist (e.g. the
+# old "steward" at country tier, now "treasurer"). Safe to run every load.
 func _ensure_offices_seeded() -> void:
-	# Expected full seed: 5 offices × N countries. If we have less, treat as
-	# a partial state (could be a save predating this feature) and re-seed.
-	# INSERT OR REPLACE makes _seed_country_offices safe to re-run.
-	db.query("SELECT COUNT(*) AS c FROM holdings WHERE region_type = 'country';")
-	if db.query_result.is_empty() or int(db.query_result[0]["c"]) == 0:
+	# Offices are now NEVER auto-filled — appointment is a lord's prerogative.
+	# Older builds seeded the table either with courtier characters or with
+	# the monarch's relatives; both should be wiped exactly ONCE so the
+	# player can re-appoint freely without our heal-on-resume stomping
+	# subsequent picks. The sentinel lives in SQLite's free `PRAGMA
+	# user_version` — no extra schema needed.
+	#
+	#   user_version = 0 → fresh DB, or pre-sweep build → do the wipe + bump
+	#   user_version ≥ 1 → sweep already done → no-op
+	db.query("PRAGMA user_version;")
+	var sentinel: int = 0
+	if not db.query_result.is_empty():
+		sentinel = int(db.query_result[0].values()[0])
+	if sentinel >= 1:
 		return
-	var country_count: int = int(db.query_result[0]["c"])
-	if _count("offices") >= country_count * COUNTRY_OFFICES.size():
-		return
-	_seed_country_offices()
-	print("GameState: ensured country offices on resumed save (%d rows)" % _count("offices"))
+	var before: int = _count("offices")
+	db.query("DELETE FROM offices;")
+	db.query("PRAGMA user_version = 1;")
+	if before > 0:
+		print("GameState: cleared %d legacy office rows (one-time sweep)" % before)
 
 
 # Start a fresh game.
@@ -1083,7 +1096,7 @@ const ACTION_CATALOG: Dictionary = {
 		"label": "Levy special tax",
 		"direction": "down", "resolution": "immediate",
 		"prestige_cost": 10,
-		"requires_office": "steward",
+		"requires_office": "treasurer",
 		"description": "Extract additional taxes from a vassal.",
 		"on_accept_opinion": -10,
 	},
@@ -1091,7 +1104,7 @@ const ACTION_CATALOG: Dictionary = {
 		"label": "Sponsor public works",
 		"direction": "down", "resolution": "immediate",
 		"prestige_cost": 25,
-		"requires_office": "steward",
+		"requires_office": "treasurer",
 		"description": "Bankroll roads, bridges, or marketplaces in a vassal's demesne.",
 		"on_accept_opinion": +15,
 	},
@@ -1138,29 +1151,39 @@ const ACTION_CATALOG: Dictionary = {
 
 
 # Office key → human-readable label used in tooltips ("privilege of …").
+# Each office key appears in EXACTLY ONE tier (no overlap across the
+# hierarchy) so a "Marshal" never co-exists with a "Marshal" two tiers
+# down — privileges are bound to a specific tier of court.
 const OFFICE_LABELS: Dictionary = {
+	# Country tier — Great Officers of the Realm.
 	"marshal":     "Marshal",
-	"steward":     "Steward",
 	"chancellor":  "Chancellor",
 	"spymaster":   "Spymaster",
 	"chaplain":    "Chaplain",
-	"chamberlain": "Chamberlain",
-	"bailiff":     "Bailiff",
+	"treasurer":   "Treasurer",
+	# Duchy tier — ducal household.
+	"constable":   "Constable",
+	"seneschal":   "Seneschal",
+	"herald":      "Herald",
+	"justiciar":   "Justiciar",
+	# County tier — county officers.
 	"sheriff":     "Sheriff",
+	"coroner":     "Coroner",
+	"bailiff":     "Bailiff",
+	# Barony tier — manor officers.
 	"castellan":   "Castellan",
 	"reeve":       "Reeve",
+	"forester":    "Forester",
 }
 
 
-# Each tier has its own roster of offices. Country has the five great offices
-# of the realm; lower tiers have progressively smaller courts. Each region of
-# tier X exposes these office slots, and the region's holder appoints among
-# their relatives or sub-region holders.
+# Per-tier office rosters. Every office key is tier-unique (no overlap), so
+# the privileges granted by each office are naturally tier-specific.
 const OFFICES_BY_TIER: Dictionary = {
-	"country": ["marshal", "steward", "chancellor", "spymaster", "chaplain"],
-	"duchy":   ["marshal", "steward", "chamberlain", "bailiff"],
-	"county":  ["sheriff", "bailiff", "castellan"],
-	"barony":  ["castellan", "reeve"],
+	"country": ["marshal", "chancellor", "spymaster", "chaplain", "treasurer"],
+	"duchy":   ["constable", "seneschal", "herald", "justiciar"],
+	"county":  ["sheriff", "coroner", "bailiff"],
+	"barony":  ["castellan", "reeve", "forester"],
 }
 
 
@@ -1745,64 +1768,122 @@ func _seed_political() -> void:
 		_set_holding("barony", lad, cid, fid)
 		_seed_close_family(cid, bh.surname, bh.gender, bh.age)
 
-	# Fill out each country's court offices (Marshal/Steward/Chancellor/
-	# Spymaster/Chaplain) with the monarch's male relatives so office-granted
-	# actions are exercisable from the moment the game starts.
-	_seed_country_offices()
-
-	print("GameState: seeded political layer — %d holdings, %d characters, %d families, %d relationships, %d offices" % [
+	# Offices intentionally start VACANT. Appointments are a lord's
+	# prerogative — see GameState.appoint_to_office / vacate_office.
+	print("GameState: seeded political layer — %d holdings, %d characters, %d families, %d relationships" % [
 		_count("holdings"), _count("characters"), _count("families"),
-		_count("relationships"), _count("offices")
+		_count("relationships")
 	])
 
 
-# For each country, appoint the monarch's adult male relatives (sons / brothers)
-# to the five great offices. Whoever's left over after the family is exhausted
-# stays as a vacancy — the player can fill them via the appoint_office action.
-const COUNTRY_OFFICES := ["marshal", "steward", "chancellor", "spymaster", "chaplain"]
-func _seed_country_offices() -> void:
-	for country in ["england", "wales", "scotland"]:
-		var monarch: Dictionary = holder_of("country", country)
-		if monarch.is_empty():
+# Office appointments are a lord's prerogative — never auto-seeded. The
+# helpers that used to spawn courtiers have been removed; see
+# appoint_to_office / vacate_office / eligible_office_candidates below for
+# the player-driven flow.
+
+
+# ── OFFICE APPOINTMENT API ───────────────────────────────────────────────────
+
+# Appoint `character_id` to (region_type, region_id, office_key). Inserts or
+# replaces — every slot holds at most one character. Caller is expected to
+# validate eligibility before calling; UI helpers do this via
+# eligible_office_candidates.
+#
+# Args:
+#   region_type, region_id, office_key (String): the office slot.
+#   character_id (int): who fills the slot. Pass 0 to leave vacant (same as
+#       vacate_office).
+# Returns: void
+func appoint_to_office(region_type: String, region_id: String,
+		office_key: String, character_id: int) -> void:
+	if character_id <= 0:
+		vacate_office(region_type, region_id, office_key)
+		return
+	db.query_with_bindings("""
+		INSERT OR REPLACE INTO offices(region_type, region_id, office_key,
+				holder_character_id, granted_turn)
+		VALUES(?,?,?,?,?);""",
+		[region_type, region_id, office_key, character_id, current_turn()]
+	)
+	state_changed.emit()
+
+
+# Remove the holder of an office slot, leaving it vacant.
+func vacate_office(region_type: String, region_id: String, office_key: String) -> void:
+	db.query_with_bindings("""
+		DELETE FROM offices
+		WHERE region_type = ? AND region_id = ? AND office_key = ?;""",
+		[region_type, region_id, office_key]
+	)
+	state_changed.emit()
+
+
+# Candidate pool for `appoint_to_office` at a given region. Returns adult
+# living male characters drawn from the region's holder's near social
+# circle: their relatives (parents/spouse/siblings/children) and the
+# holders of any sub-regions they directly oversee.
+#
+# Args:
+#   region_type, region_id (String).
+# Returns:
+#   Array of {character_id, given_name, surname, title, age, relation_hint}
+#   suitable for an appointment picker list. Empty if region has no holder.
+func eligible_office_candidates(region_type: String, region_id: String) -> Array:
+	var holder: Dictionary = holder_of(region_type, region_id)
+	if holder.is_empty():
+		return []
+	var holder_id: int = int(holder.get("character_id", 0))
+	# Use a Dict to de-dupe by character_id while preserving the first
+	# relation_hint we encountered.
+	var seen: Dictionary = {}
+	var out: Array = []
+
+	# 1. The lord's relatives.
+	db.query_with_bindings("""
+		SELECT r.kind AS relation_hint, c.id AS character_id, c.given_name,
+		       c.title, c.age, f.surname
+		FROM relationships r
+		JOIN characters c ON c.id = r.related_id
+		LEFT JOIN families f ON f.id = c.family_id
+		WHERE r.character_id = ?
+		  AND c.alive = 1 AND c.age >= 16
+		ORDER BY c.age DESC;""", [holder_id])
+	for row in db.query_result:
+		var cid: int = int(row["character_id"])
+		if seen.has(cid):
 			continue
-		var monarch_id: int = int(monarch.get("character_id", 0))
-		# Eligible appointees: adult living male children + siblings of the
-		# monarch, ordered by age desc.
-		db.query_with_bindings("""
-			SELECT c.id FROM relationships r
-			JOIN characters c ON c.id = r.related_id
-			WHERE r.character_id = ?
-			  AND r.kind IN ('child', 'sibling')
-			  AND c.alive = 1
-			  AND c.gender = 'male'
-			  AND c.age >= 18
-			ORDER BY c.age DESC;""", [monarch_id])
-		var candidates: Array = []
-		for row in db.query_result:
-			candidates.append(int(row["id"]))
-		# Fill offices in order, generating fresh courtier characters when the
-		# monarch has no eligible relative — historically these would be
-		# nobles drawn from the realm's wider gentry, so we spawn them from
-		# the regional name pool with their own family.
-		var country_letter: String = country.substr(0, 1).to_upper()  # "E"/"W"/"S"
-		for office_key in COUNTRY_OFFICES:
-			var appointee_id: int = 0
-			if not candidates.is_empty():
-				appointee_id = candidates.pop_front()
-			else:
-				appointee_id = _spawn_courtier(country_letter, office_key)
-			if appointee_id <= 0:
-				continue
-			db.query_with_bindings("""
-				INSERT OR REPLACE INTO offices(region_type, region_id, office_key, holder_character_id, granted_turn)
-				VALUES(?,?,?,?,0);""",
-				["country", country, office_key, appointee_id]
-			)
+		seen[cid] = true
+		out.append({
+			"character_id": cid,
+			"given_name": str(row["given_name"]),
+			"surname": str(row["surname"]),
+			"title": str(row["title"]),
+			"age": int(row["age"]),
+			"relation_hint": str(row["relation_hint"]),
+		})
+
+	# 2. Holders of sub-regions (i.e. vassals of this lord).
+	for v in vassals_of(holder_id):
+		var cid: int = int(v.get("character_id", 0))
+		if cid <= 0 or seen.has(cid):
+			continue
+		seen[cid] = true
+		out.append({
+			"character_id": cid,
+			"given_name": str(v.get("given_name", "")),
+			"surname": str(v.get("surname", "")),
+			"title": str(v.get("title", "Lord")),
+			"age": int(v.get("age", 0)),
+			"relation_hint": "vassal",
+		})
+
+	return out
 
 
-# Generate a fresh adult male character from the regional name pool to fill
-# a court office when no eligible relative exists. Returns the new id, or 0
-# if name pools haven't loaded.
+# Legacy helper retained for completeness — generates a fresh adult male
+# character from the regional name pool. NO LONGER CALLED by office seeding;
+# kept in case future systems need to spawn courtiers (e.g. faction events
+# or claim resolution). Returns the new id, or 0 if pools haven't loaded.
 func _spawn_courtier(country_letter: String, office_key: String) -> int:
 	if not DesignData.loaded:
 		return 0

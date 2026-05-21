@@ -215,7 +215,7 @@ func _build_overview_tab(ch: Dictionary) -> Control:
 	split.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	col.add_child(split)
 
-	# LEFT: Stats / Offices / Holdings.
+	# LEFT: Stats / Offices / Holdings / Vassals.
 	var left := VBoxContainer.new()
 	left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	left.size_flags_stretch_ratio = 1.0
@@ -224,6 +224,7 @@ func _build_overview_tab(ch: Dictionary) -> Control:
 	_build_stats(left, ch)
 	_build_offices(left, ch)
 	_build_holdings(left, ch)
+	_build_vassals(left, ch)
 
 	# RIGHT: Family.
 	var right := VBoxContainer.new()
@@ -261,6 +262,49 @@ func _build_holdings(parent: Control, ch: Dictionary) -> void:
 			"· %s — %s" % [str(r.region_type).capitalize(), _pretty_region(r)],
 			12, UITheme.COL_INK)
 		parent.add_child(lbl)
+
+
+# Vassals section — every sub-region holder that answers to this character
+# across all of their holdings. Each row is a clickable button that routes
+# to the vassal's character panel via NavRouter.
+func _build_vassals(parent: Control, ch: Dictionary) -> void:
+	var cid: int = int(ch.get("character_id", 0))
+	if cid <= 0:
+		return
+	var vassals: Array = GameState.vassals_of(cid)
+	if vassals.is_empty():
+		return
+	parent.add_child(UITheme.section_header("Vassals"))
+	for v in vassals:
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 8)
+		parent.add_child(row)
+		# Region context (compact, dim).
+		var region_lbl := UITheme.dim_label(
+			"%s · %s" % [
+				str(v.get("region_type", "")).capitalize(),
+				str(v.get("region_id", "")),
+			], 11)
+		region_lbl.custom_minimum_size.x = 130
+		row.add_child(region_lbl)
+		var alive: bool = bool(v.get("alive", true))
+		var name_btn := Button.new()
+		name_btn.flat = true
+		var dagger: String = "  ✝" if not alive else ""
+		name_btn.text = "%s %s%s" % [
+			str(v.get("given_name", "")),
+			str(v.get("surname", "")),
+			dagger,
+		]
+		name_btn.add_theme_font_size_override("font_size", 12)
+		name_btn.add_theme_color_override("font_color",
+				UITheme.COL_INK_DEAD if not alive else UITheme.COL_INK)
+		name_btn.add_theme_color_override("font_hover_color", UITheme.COL_BUTTON_HOVER)
+		name_btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		name_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var vcid: int = int(v.get("character_id", 0))
+		name_btn.pressed.connect(func(): navigate_to.emit(vcid))
+		row.add_child(name_btn)
 
 
 func _build_offices(parent: Control, ch: Dictionary) -> void:

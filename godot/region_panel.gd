@@ -19,6 +19,9 @@ var _region_type: String = ""
 var _region_id: String = ""
 var _root: VBoxContainer
 var _tabs: TabContainer
+# Which office slot is currently expanded for picking. Form "<key>" where
+# key matches GameState's office_key column. Empty = no picker showing.
+var _picking_office: String = ""
 
 
 func _ready() -> void:
@@ -201,12 +204,16 @@ func _build_offices_tab() -> Control:
 			"" if slots.size() == 1 else "s",
 		]))
 	for office_key in slots:
-		col.add_child(_office_row(str(office_key)))
+		var ok: String = str(office_key)
+		col.add_child(_office_row(ok))
+		# Inline candidate picker, expanded under whichever slot the user
+		# clicked Appoint / Replace on.
+		if _picking_office == ok:
+			col.add_child(_build_office_picker(ok))
 	return col
 
 
-# Single row in the Offices tab: label (left), holder (clickable button)
-# or "— Vacant —". Office-key label is gold so it visually stands out.
+# Single row: label + holder (clickable) + Appoint…/Replace…/Dismiss buttons.
 func _office_row(office_key: String) -> Control:
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 12)
@@ -219,6 +226,9 @@ func _office_row(office_key: String) -> Control:
 		var vacant := UITheme.dim_label("— Vacant —", 12)
 		vacant.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		row.add_child(vacant)
+		var appoint_btn := UITheme.styled_button("Appoint…")
+		appoint_btn.pressed.connect(func(): _toggle_office_picker(office_key))
+		row.add_child(appoint_btn)
 	else:
 		var alive: bool = bool(holder.get("alive", true))
 		var person_btn := Button.new()
@@ -238,7 +248,63 @@ func _office_row(office_key: String) -> Control:
 		row.add_child(person_btn)
 		var age := UITheme.dim_label("· %d" % int(holder.get("age", 0)), 11)
 		row.add_child(age)
+		var replace_btn := UITheme.styled_button("Replace…")
+		replace_btn.pressed.connect(func(): _toggle_office_picker(office_key))
+		row.add_child(replace_btn)
+		var vacate_btn := UITheme.styled_button("Dismiss")
+		vacate_btn.pressed.connect(func(): _vacate_office(office_key))
+		row.add_child(vacate_btn)
 	return row
+
+
+func _toggle_office_picker(office_key: String) -> void:
+	_picking_office = "" if _picking_office == office_key else office_key
+	_rebuild()
+
+
+func _build_office_picker(office_key: String) -> Control:
+	var box := PanelContainer.new()
+	box.add_theme_stylebox_override("panel", UITheme.chip_stylebox(false))
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 4)
+	box.add_child(col)
+	col.add_child(UITheme.dim_label(
+		"Select a candidate for %s:" % str(GameState.OFFICE_LABELS.get(office_key, office_key.capitalize())),
+		11))
+	var candidates: Array = GameState.eligible_office_candidates(_region_type, _region_id)
+	if candidates.is_empty():
+		col.add_child(UITheme.dim_label("(no eligible candidates — try the lord's family or sub-region holders)", 11))
+	for cand in candidates:
+		var pick_btn := Button.new()
+		pick_btn.flat = true
+		pick_btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		pick_btn.text = "  %s %s   · %d   · %s" % [
+			str(cand.get("given_name", "")),
+			str(cand.get("surname", "")),
+			int(cand.get("age", 0)),
+			str(cand.get("relation_hint", "")),
+		]
+		pick_btn.add_theme_font_size_override("font_size", 12)
+		pick_btn.add_theme_color_override("font_color", UITheme.COL_INK)
+		pick_btn.add_theme_color_override("font_hover_color", UITheme.COL_BUTTON_HOVER)
+		var cid: int = int(cand.get("character_id", 0))
+		pick_btn.pressed.connect(func(): _appoint_office(office_key, cid))
+		col.add_child(pick_btn)
+	var cancel := UITheme.styled_button("Cancel")
+	cancel.pressed.connect(func(): _toggle_office_picker(office_key))
+	col.add_child(cancel)
+	return box
+
+
+func _appoint_office(office_key: String, character_id: int) -> void:
+	GameState.appoint_to_office(_region_type, _region_id, office_key, character_id)
+	_picking_office = ""
+	_rebuild()
+
+
+func _vacate_office(office_key: String) -> void:
+	GameState.vacate_office(_region_type, _region_id, office_key)
+	_rebuild()
 
 
 func _build_subregions_tab() -> Control:

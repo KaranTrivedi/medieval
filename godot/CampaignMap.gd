@@ -411,14 +411,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			MOUSE_BUTTON_WHEEL_DOWN:
 				if mb.pressed:
 					_zoom_at_cursor(1.0 / ZOOM_STEP)
-			MOUSE_BUTTON_XBUTTON1:
-				# Side-button "back" (mouse4) — browser-style nav history.
-				if mb.pressed and _nav != null:
-					_nav.back()
-			MOUSE_BUTTON_XBUTTON2:
-				# Side-button "forward" (mouse5).
-				if mb.pressed and _nav != null:
-					_nav.forward()
+			# Side buttons (XBUTTON1/XBUTTON2) for nav history are handled
+			# in NavRouter._input — see comment there for the why.
 	elif event is InputEventMouseMotion:
 		var mm := event as InputEventMouseMotion
 		# Left-mouse-drag pan: promote a held left-button to "dragging" once

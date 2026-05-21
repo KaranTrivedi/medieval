@@ -22,6 +22,28 @@ var _cursor: int = -1
 var _navigating: bool = false
 
 
+# Mouse4 / Mouse5 (XBUTTON1 / XBUTTON2) walk the history. Handled in _input
+# instead of CampaignMap._unhandled_input because the modal panels have
+# mouse_filter = STOP and would otherwise swallow the side-button presses
+# before they ever reach an unhandled-input handler. _input fires first on
+# every Node in the tree, so we get the event regardless of which panel
+# has focus, then mark it handled so the click doesn't also fall through
+# to any button under the cursor.
+func _input(event: InputEvent) -> void:
+	if not (event is InputEventMouseButton):
+		return
+	var mb := event as InputEventMouseButton
+	if not mb.pressed:
+		return
+	match mb.button_index:
+		MOUSE_BUTTON_XBUTTON1:
+			back()
+			get_viewport().set_input_as_handled()
+		MOUSE_BUTTON_XBUTTON2:
+			forward()
+			get_viewport().set_input_as_handled()
+
+
 # ── PUBLIC API ───────────────────────────────────────────────────────────────
 
 func open_character(character_id: int) -> void:

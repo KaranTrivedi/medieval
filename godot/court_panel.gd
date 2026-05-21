@@ -15,6 +15,10 @@ signal open_region_request(region_type: String, region_id: String)
 
 var _country_id: String = ""
 var _root: VBoxContainer
+# When the user clicks "Appoint…" / "Replace…", we remember which slot
+# is being filled so the candidate-row click handler knows what to write.
+# Form: "<region_type>|<region_id>|<office_key>".
+var _picking_slot: String = ""
 
 
 func _ready() -> void:
@@ -108,11 +112,16 @@ func _build_offices_section() -> void:
 	_root.add_child(UITheme.section_header("Great Offices of the Realm"))
 	var offices: Array = GameState.OFFICES_BY_TIER.get("country", [])
 	for office_key in offices:
-		_root.add_child(_office_row("country", _country_id, str(office_key)))
+		var ok: String = str(office_key)
+		_root.add_child(_office_row("country", _country_id, ok))
+		# If this is the slot the user just clicked Appoint on, inline the
+		# candidate picker right under it.
+		if _picking_slot == _slot_key("country", _country_id, ok):
+			_root.add_child(_build_picker("country", _country_id, ok))
 
 
-# A single row showing one office: name + holder (or "Vacant" + appoint hint).
-# Returns a Control row.
+# A single row showing one office: name + holder (or "Vacant") + appoint /
+# replace / vacate buttons. Returns a Control row.
 func _office_row(region_type: String, region_id: String, office_key: String) -> Control:
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 12)
@@ -128,8 +137,9 @@ func _office_row(region_type: String, region_id: String, office_key: String) -> 
 		var vacant := UITheme.dim_label("— Vacant —", 12)
 		vacant.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		row.add_child(vacant)
-		# Future: an "Appoint…" button can land here. For now we leave the
-		# slot visibly empty so the player knows the action is available.
+		var appoint_btn := UITheme.styled_button("Appoint…")
+		appoint_btn.pressed.connect(func(): _toggle_picker(region_type, region_id, office_key))
+		row.add_child(appoint_btn)
 	else:
 		var alive: bool = bool(holder.get("alive", true))
 		var person_btn := Button.new()
@@ -149,10 +159,75 @@ func _office_row(region_type: String, region_id: String, office_key: String) -> 
 		var cid: int = int(holder.get("character_id", 0))
 		person_btn.pressed.connect(func(): open_character_request.emit(cid))
 		row.add_child(person_btn)
-		# Age tag.
 		var age := UITheme.dim_label("· %d" % int(holder.get("age", 0)), 11)
 		row.add_child(age)
+		var replace_btn := UITheme.styled_button("Replace…")
+		replace_btn.pressed.connect(func(): _toggle_picker(region_type, region_id, office_key))
+		row.add_child(replace_btn)
+		var vacate_btn := UITheme.styled_button("Dismiss")
+		vacate_btn.pressed.connect(func(): _vacate(region_type, region_id, office_key))
+		row.add_child(vacate_btn)
 	return row
+
+
+# Toggle the inline candidate picker for a given slot. Calling on the same
+# slot a second time collapses the picker.
+func _toggle_picker(region_type: String, region_id: String, office_key: String) -> void:
+	var key := _slot_key(region_type, region_id, office_key)
+	_picking_slot = "" if _picking_slot == key else key
+	_rebuild()
+
+
+func _slot_key(region_type: String, region_id: String, office_key: String) -> String:
+	return "%s|%s|%s" % [region_type, region_id, office_key]
+
+
+# Build the inline candidate list shown when the user clicks Appoint /
+# Replace. Each candidate is a button — clicking it calls appoint and
+# collapses the picker.
+func _build_picker(region_type: String, region_id: String, office_key: String) -> Control:
+	var box := PanelContainer.new()
+	box.add_theme_stylebox_override("panel", UITheme.chip_stylebox(false))
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 4)
+	box.add_child(col)
+	col.add_child(UITheme.dim_label(
+		"Select a candidate for %s:" % str(GameState.OFFICE_LABELS.get(office_key, office_key.capitalize())),
+		11))
+	var candidates: Array = GameState.eligible_office_candidates(region_type, region_id)
+	if candidates.is_empty():
+		col.add_child(UITheme.dim_label("(no eligible candidates)", 11))
+	for cand in candidates:
+		var pick_btn := Button.new()
+		pick_btn.flat = true
+		pick_btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		pick_btn.text = "  %s %s   · %d   · %s" % [
+			str(cand.get("given_name", "")),
+			str(cand.get("surname", "")),
+			int(cand.get("age", 0)),
+			str(cand.get("relation_hint", "")),
+		]
+		pick_btn.add_theme_font_size_override("font_size", 12)
+		pick_btn.add_theme_color_override("font_color", UITheme.COL_INK)
+		pick_btn.add_theme_color_override("font_hover_color", UITheme.COL_BUTTON_HOVER)
+		var cid: int = int(cand.get("character_id", 0))
+		pick_btn.pressed.connect(func(): _appoint(region_type, region_id, office_key, cid))
+		col.add_child(pick_btn)
+	var cancel := UITheme.styled_button("Cancel")
+	cancel.pressed.connect(func(): _toggle_picker(region_type, region_id, office_key))
+	col.add_child(cancel)
+	return box
+
+
+func _appoint(region_type: String, region_id: String, office_key: String, character_id: int) -> void:
+	GameState.appoint_to_office(region_type, region_id, office_key, character_id)
+	_picking_slot = ""
+	_rebuild()
+
+
+func _vacate(region_type: String, region_id: String, office_key: String) -> void:
+	GameState.vacate_office(region_type, region_id, office_key)
+	_rebuild()
 
 
 func _build_vassals_section() -> void:
