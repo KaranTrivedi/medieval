@@ -1,11 +1,15 @@
 # character_panel.gd
-# A centred Panel showing one character: name + house, title, age, stats,
-# current holdings, and immediate family. Built programmatically — no
-# scene-authored fields. Triggered when the InfoPanel holder row is clicked
-# (or when navigating from the family-tree view).
+# Centred modal showing one character. Tabbed layout:
+#   • Overview   — header (portrait, name, title, age, prestige) + 2-column
+#                  body with Stats / Holdings / Offices on the left and Family
+#                  on the right.
+#   • History    — chronological lifecycle event log.
+#   • Diplomacy  — opinion display, action buttons, and pending inbox.
+# Footer outside the tabs holds Family-Tree and Close buttons.
 #
-# A single instance lives under UI/Control; the parent (CampaignMap or
-# ui_panel) calls `show_for(character_id)` to populate + reveal it.
+# Triggered via `show_for(character_id)` from CampaignMap / region panel /
+# family-tree panel. Always brings itself to the front so it stacks above
+# other open modals.
 
 extends Panel
 
@@ -13,39 +17,28 @@ signal closed
 signal navigate_to(character_id: int)     # follow a Relations row
 signal open_family_tree(character_id: int)
 
-# Title text styles per gender, used as a fallback when characters.title is
-# generic ("Lord"/"Lady") so the header reads a bit more grandly.
-const TITLE_OVERRIDES := {
-	"male":   ["Lord", "Sir"],
-	"female": ["Lady", "Dame"],
-}
-
-var vbox: VBoxContainer
+var _root: VBoxContainer
+var _tabs: TabContainer
 var _shown_character_id: int = 0
 
 
 func _ready() -> void:
-	# Centred, fixed size. The parent .tscn anchors this; we just style + build.
-	custom_minimum_size = Vector2(560, 620)
+	custom_minimum_size = Vector2(820, 660)
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	UITheme.style_panel(self)
 
-	# Outer container.
-	vbox = VBoxContainer.new()
-	vbox.anchor_right = 1.0
-	vbox.anchor_bottom = 1.0
-	vbox.offset_left = 18
-	vbox.offset_top = 14
-	vbox.offset_right = -18
-	vbox.offset_bottom = -14
-	vbox.add_theme_constant_override("separation", 10)
-	add_child(vbox)
+	_root = VBoxContainer.new()
+	_root.anchor_right = 1.0
+	_root.anchor_bottom = 1.0
+	_root.offset_left = 18
+	_root.offset_top = 14
+	_root.offset_right = -18
+	_root.offset_bottom = -14
+	_root.add_theme_constant_override("separation", 10)
+	add_child(_root)
 	visible = false
 
 
-# Esc closes the panel when it's the active prompt. Uses _input + accept_event
-# so the keypress is consumed before CampaignMap._unhandled_input fires its
-# own ESC handler (which would otherwise clear the map selection too).
 func _input(event: InputEvent) -> void:
 	if not visible:
 		return
@@ -59,6 +52,15 @@ func show_for(character_id: int) -> void:
 	_shown_character_id = character_id
 	_rebuild()
 	visible = true
+	_raise_to_front()
+
+
+# Bump this panel to the top of its parent's child list so it draws above
+# any sibling modal (e.g. RegionPanel) that was already open.
+func _raise_to_front() -> void:
+	var p := get_parent()
+	if p != null:
+		p.move_child(self, p.get_child_count() - 1)
 
 
 func close() -> void:
@@ -66,43 +68,52 @@ func close() -> void:
 	closed.emit()
 
 
+# ── REBUILD ─────────────────────────────────────────────────────────────────
+
 func _rebuild() -> void:
-	for child in vbox.get_children():
+	for child in _root.get_children():
 		child.queue_free()
 	if _shown_character_id <= 0:
-		_label("No character selected.", 16, Color.WHITE)
+		_root.add_child(UITheme.text_label("No character selected.", 14))
 		return
 	var ch: Dictionary = GameState.character(_shown_character_id)
 	if ch.is_empty():
-		_label("Character #%d not found." % _shown_character_id, 16, Color(1, 0.6, 0.6))
+		_root.add_child(UITheme.text_label("Character #%d not found." % _shown_character_id, 14, Color(1, 0.6, 0.6)))
 		return
 
 	_build_header(ch)
-	_build_stats(ch)
-	_build_offices(ch)
-	_build_holdings(ch)
-	_build_relations(ch)
-	_build_lifecycle(ch)
-	_build_actions(ch)
-	_build_inbox(ch)
+	_tabs = TabContainer.new()
+	_tabs.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_tabs.add_theme_stylebox_override("panel", UITheme.tab_panel_stylebox())
+	_root.add_child(_tabs)
+	_tabs.add_child(_build_overview_tab(ch))
+	_tabs.add_child(_build_history_tab(ch))
+	_tabs.add_child(_build_diplomacy_tab(ch))
+	_tabs.set_tab_title(0, "Overview")
+	_tabs.set_tab_title(1, "History")
+	_tabs.set_tab_title(2, "Diplomacy")
+
 	_build_footer(ch)
 
+
+# ── HEADER ──────────────────────────────────────────────────────────────────
 
 func _build_header(ch: Dictionary) -> void:
 	var top := HBoxContainer.new()
 	top.add_theme_constant_override("separation", 14)
-	vbox.add_child(top)
+	_root.add_child(top)
 
-	# Portrait placeholder.
+	# Portrait placeholder — initials over a parchment-dark square.
 	var portrait := ColorRect.new()
-	portrait.custom_minimum_size = Vector2(80, 96)
-	portrait.color = Color(0.18, 0.13, 0.08)
+	portrait.custom_minimum_size = Vector2(88, 96)
+	portrait.color = Color(0.14, 0.10, 0.06)
 	top.add_child(portrait)
 	var initials := Label.new()
-	initials.text = (str(ch.get("given_name", "?")).substr(0, 1) +
-			str(ch.get("surname", "?")).substr(0, 1)).to_upper()
+	initials.text = (str(ch.get("given_name", "?")).substr(0, 1)
+			+ str(ch.get("surname", "?")).substr(0, 1)).to_upper()
 	initials.add_theme_font_size_override("font_size", 36)
-	initials.add_theme_color_override("font_color", Color(0.85, 0.78, 0.50))
+	initials.add_theme_color_override("font_color", UITheme.COL_ACCENT_GOLD_DIM)
 	initials.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	initials.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	initials.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
@@ -110,124 +121,168 @@ func _build_header(ch: Dictionary) -> void:
 	initials.anchor_bottom = 1.0
 	portrait.add_child(initials)
 
-	# Right column — name + title + age.
+	# Right column — name + title + age + prestige.
 	var right := VBoxContainer.new()
 	right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	right.add_theme_constant_override("separation", 2)
 	top.add_child(right)
 
+	var alive: bool = bool(ch.get("alive", true))
 	var name_lbl := Label.new()
-	var full_name: String = (str(ch.get("given_name", "")) + " " + str(ch.get("surname", ""))).strip_edges()
-	if not bool(ch.get("alive", true)):
-		full_name += "  †"
+	var full_name: String = (str(ch.get("given_name", "")) + " "
+			+ str(ch.get("surname", ""))).strip_edges()
+	if not alive:
+		full_name += "  ✝"
 	name_lbl.text = full_name
 	name_lbl.add_theme_font_size_override("font_size", 26)
-	name_lbl.add_theme_color_override("font_color", Color(0.95, 0.88, 0.62))
+	name_lbl.add_theme_color_override("font_color",
+			UITheme.COL_INK_DEAD if not alive else UITheme.COL_ACCENT_GOLD)
 	name_lbl.add_theme_constant_override("outline_size", 1)
 	name_lbl.add_theme_color_override("font_outline_color", Color(0.05, 0.04, 0.01))
 	right.add_child(name_lbl)
 
-	# Title + "of House [Surname]" — the surname is a button that opens the
-	# family tree. Built as an HBoxContainer so the surname keeps its hover
-	# tint without underlining the whole "Duke of House" prefix.
-	var title_row := HBoxContainer.new()
-	title_row.add_theme_constant_override("separation", 4)
-	right.add_child(title_row)
-	var title_lbl := Label.new()
+	# Title row. Reads "Duke, head of House Lacy" for landed characters; for
+	# non-holders it reads "Member of House Lacy". The House surname is a
+	# button that opens the family tree.
+	right.add_child(_build_title_row(ch))
+
+	var meta_lbl := Label.new()
+	meta_lbl.text = "%s · %d years" % [
+		str(ch.get("gender", "?")).capitalize(),
+		int(ch.get("age", 0)),
+	]
+	meta_lbl.add_theme_font_size_override("font_size", 12)
+	meta_lbl.add_theme_color_override("font_color", UITheme.COL_INK_MUTED)
+	right.add_child(meta_lbl)
+
+	if int(ch.get("prestige", 0)) > 0:
+		var p := Label.new()
+		p.text = "House prestige: %d" % int(ch.get("prestige", 0))
+		p.add_theme_font_size_override("font_size", 11)
+		p.add_theme_color_override("font_color", UITheme.COL_INK_MUTED)
+		right.add_child(p)
+
+
+# Produce the line that follows the name. Format depends on whether the
+# character is the holder of any region:
+#   • holder       → "<Title>, head of House <Surname>"
+#   • non-holder   → "Member of House <Surname>"
+# The surname is rendered as a flat Button that opens the family tree.
+func _build_title_row(ch: Dictionary) -> Control:
+	var cid: int = int(ch.get("character_id", 0))
+	var holdings: Array = GameState.holdings_of(cid) if cid > 0 else []
+	var is_head: bool = not holdings.is_empty()
+	var house: String = str(ch.get("surname", "")).strip_edges()
 	var title: String = str(ch.get("title", "Lord"))
-	var house: String = str(ch.get("surname", ""))
-	title_lbl.text = "%s of House" % title if house != "" else title
-	title_lbl.add_theme_font_size_override("font_size", 14)
-	title_lbl.add_theme_color_override("font_color", Color(0.75, 0.70, 0.55))
-	title_row.add_child(title_lbl)
+
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 4)
+
+	var prefix := Label.new()
+	if house == "":
+		prefix.text = title
+	elif is_head:
+		prefix.text = "%s, head of House" % title
+	else:
+		prefix.text = "Member of House"
+	prefix.add_theme_font_size_override("font_size", 14)
+	prefix.add_theme_color_override("font_color", UITheme.COL_INK_DIM)
+	row.add_child(prefix)
+
 	if house != "":
 		var house_btn := Button.new()
 		house_btn.text = house
 		house_btn.flat = true
 		house_btn.add_theme_font_size_override("font_size", 14)
-		house_btn.add_theme_color_override("font_color", Color(0.95, 0.85, 0.45))
-		house_btn.add_theme_color_override("font_hover_color", Color(1.0, 0.97, 0.55))
-		var cid_for_house: int = int(ch.get("character_id", 0))
-		house_btn.pressed.connect(func(): open_family_tree.emit(cid_for_house))
-		title_row.add_child(house_btn)
+		house_btn.add_theme_color_override("font_color", UITheme.COL_ACCENT_GOLD)
+		house_btn.add_theme_color_override("font_hover_color", UITheme.COL_BUTTON_HOVER)
+		house_btn.tooltip_text = "Open family tree of House " + house
+		house_btn.pressed.connect(func(): open_family_tree.emit(int(ch.get("character_id", 0))))
+		row.add_child(house_btn)
 
-	var meta_lbl := Label.new()
-	meta_lbl.text = "%s · %d years" % [str(ch.get("gender", "?")).capitalize(), int(ch.get("age", 0))]
-	meta_lbl.add_theme_font_size_override("font_size", 12)
-	meta_lbl.add_theme_color_override("font_color", Color(0.60, 0.55, 0.42))
-	right.add_child(meta_lbl)
-
-	if int(ch.get("prestige", 0)) > 0:
-		var prestige := Label.new()
-		prestige.text = "House prestige: %d" % int(ch.get("prestige", 0))
-		prestige.add_theme_font_size_override("font_size", 11)
-		prestige.add_theme_color_override("font_color", Color(0.55, 0.50, 0.38))
-		right.add_child(prestige)
-
-	vbox.add_child(HSeparator.new())
+	return row
 
 
-func _build_stats(ch: Dictionary) -> void:
-	_section_header("Stats")
+# ── OVERVIEW TAB (two-column) ───────────────────────────────────────────────
+
+func _build_overview_tab(ch: Dictionary) -> Control:
+	var col := VBoxContainer.new()
+	col.name = "Overview"
+	col.add_theme_constant_override("separation", 8)
+	var split := HBoxContainer.new()
+	split.add_theme_constant_override("separation", 20)
+	split.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	split.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	col.add_child(split)
+
+	# LEFT: Stats / Offices / Holdings.
+	var left := VBoxContainer.new()
+	left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	left.size_flags_stretch_ratio = 1.0
+	left.add_theme_constant_override("separation", 12)
+	split.add_child(left)
+	_build_stats(left, ch)
+	_build_offices(left, ch)
+	_build_holdings(left, ch)
+
+	# RIGHT: Family.
+	var right := VBoxContainer.new()
+	right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	right.size_flags_stretch_ratio = 1.0
+	right.add_theme_constant_override("separation", 12)
+	split.add_child(right)
+	_build_relations(right, ch)
+
+	return col
+
+
+func _build_stats(parent: Control, ch: Dictionary) -> void:
+	parent.add_child(UITheme.section_header("Stats"))
 	var grid := GridContainer.new()
 	grid.columns = 2
 	grid.add_theme_constant_override("h_separation", 24)
 	grid.add_theme_constant_override("v_separation", 4)
-	vbox.add_child(grid)
+	parent.add_child(grid)
 	const KEYS := ["martial", "diplomacy", "stewardship", "intrigue", "piety"]
 	for k in KEYS:
-		var key_lbl := Label.new()
-		key_lbl.text = String(k).capitalize()
-		key_lbl.add_theme_font_size_override("font_size", 12)
-		key_lbl.add_theme_color_override("font_color", Color(0.65, 0.60, 0.50))
-		grid.add_child(key_lbl)
-		var val_lbl := Label.new()
-		val_lbl.text = str(int(ch.get(k, 0)))
-		val_lbl.add_theme_font_size_override("font_size", 13)
-		val_lbl.add_theme_color_override("font_color", Color(0.95, 0.92, 0.80))
-		grid.add_child(val_lbl)
+		grid.add_child(UITheme.dim_label(String(k).capitalize(), 12))
+		var v := UITheme.text_label(str(int(ch.get(k, 0))), 13)
+		v.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		grid.add_child(v)
 
 
-func _build_holdings(ch: Dictionary) -> void:
+func _build_holdings(parent: Control, ch: Dictionary) -> void:
 	var rows: Array = GameState.holdings_of(int(ch.get("character_id", 0)))
 	if rows.is_empty():
 		return
-	_section_header("Holdings")
+	parent.add_child(UITheme.section_header("Holdings"))
 	for r in rows:
-		var lbl := Label.new()
-		lbl.text = "  · %s — %s" % [str(r.region_type).capitalize(), _pretty_region(r)]
-		lbl.add_theme_font_size_override("font_size", 12)
-		lbl.add_theme_color_override("font_color", Color(0.85, 0.80, 0.65))
-		vbox.add_child(lbl)
+		var lbl := UITheme.text_label(
+			"· %s — %s" % [str(r.region_type).capitalize(), _pretty_region(r)],
+			12, UITheme.COL_INK)
+		parent.add_child(lbl)
 
 
-func _pretty_region(r: Dictionary) -> String:
-	# County and country IDs are already human-readable. Duchies are lowercase
-	# slugs; baronies are LAD13CDs — show what we can.
-	var rid: String = str(r.region_id)
-	match str(r.region_type):
-		"country": return rid.capitalize()
-		"duchy":
-			var d: Dictionary = MapData.duchies.get(rid, {})
-			return str(d.get("name", rid))
-		"county":  return rid
-		"barony":
-			# Look up name from the geometry side via DesignData/MapData if possible.
-			var dd: Node = get_node_or_null("/root/DesignData")
-			if dd != null:
-				var b: Dictionary = dd.baronies.get(rid, {})
-				if "name" in b:
-					return "%s (%s)" % [str(b.name), rid]
-			return rid
-	return rid
+func _build_offices(parent: Control, ch: Dictionary) -> void:
+	var offices: Array = GameState.offices_of(int(ch.get("character_id", 0)))
+	if offices.is_empty():
+		return
+	parent.add_child(UITheme.section_header("Offices"))
+	for o in offices:
+		var rid_label: String = str(o.region_id).capitalize() if str(o.region_type) == "country" else str(o.region_id)
+		var lbl := UITheme.text_label(
+			"· %s of %s — %s" % [str(o.office_key).capitalize(), rid_label, str(o.region_type).capitalize()],
+			12, UITheme.COL_INK)
+		parent.add_child(lbl)
 
 
-func _build_relations(ch: Dictionary) -> void:
+func _build_relations(parent: Control, ch: Dictionary) -> void:
 	var rels: Array = GameState.relations_of(int(ch.get("character_id", 0)))
 	if rels.is_empty():
+		parent.add_child(UITheme.section_header("Family"))
+		parent.add_child(UITheme.dim_label("(no recorded relations)", 11))
 		return
-	_section_header("Family")
-	# Group by kind for clean display.
+	parent.add_child(UITheme.section_header("Family"))
 	var grouped: Dictionary = {}
 	for r in rels:
 		var k: String = str(r.kind)
@@ -238,79 +293,39 @@ func _build_relations(ch: Dictionary) -> void:
 		if not grouped.has(kind):
 			continue
 		for other in grouped[kind]:
-			_relation_row(_relation_label(kind, other), other)
+			parent.add_child(_relation_row(_relation_label(kind, other), other))
 
 
-func _relation_label(kind: String, other: Dictionary) -> String:
-	var gender: String = str(other.get("gender", "male"))
-	match kind:
-		"spouse": return "Wife" if gender == "female" else "Husband"
-		"parent": return "Mother" if gender == "female" else "Father"
-		"child":  return "Daughter" if gender == "female" else "Son"
-		"sibling": return "Sister" if gender == "female" else "Brother"
-	return kind.capitalize()
+# ── HISTORY TAB ─────────────────────────────────────────────────────────────
 
-
-func _relation_row(role: String, other: Dictionary) -> void:
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 8)
-	vbox.add_child(row)
-
-	var role_lbl := Label.new()
-	role_lbl.text = role
-	role_lbl.custom_minimum_size.x = 70
-	role_lbl.add_theme_font_size_override("font_size", 12)
-	role_lbl.add_theme_color_override("font_color", Color(0.55, 0.50, 0.38))
-	row.add_child(role_lbl)
-
-	var name_btn := Button.new()
-	var full: String = (str(other.get("given_name", "")) + " " + str(other.get("surname", ""))).strip_edges()
-	if not bool(other.get("alive", true)):
-		full += " †"
-	name_btn.text = full + "  · " + str(int(other.get("age", 0)))
-	name_btn.flat = true
-	name_btn.add_theme_font_size_override("font_size", 13)
-	name_btn.add_theme_color_override("font_color", Color(0.95, 0.90, 0.70))
-	name_btn.add_theme_color_override("font_hover_color", Color(1.0, 0.95, 0.55))
-	name_btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
-	name_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	name_btn.pressed.connect(func(): navigate_to.emit(int(other.get("character_id", 0))))
-	row.add_child(name_btn)
-
-
-func _build_offices(ch: Dictionary) -> void:
-	var offices: Array = GameState.offices_of(int(ch.get("character_id", 0)))
-	if offices.is_empty():
-		return
-	_section_header("Offices")
-	for o in offices:
-		var lbl := Label.new()
-		lbl.text = "  · %s of %s — %s" % [
-			str(o.office_key).capitalize(),
-			str(o.region_id).capitalize() if str(o.region_type) == "country" else str(o.region_id),
-			str(o.region_type).capitalize(),
-		]
-		lbl.add_theme_font_size_override("font_size", 12)
-		lbl.add_theme_color_override("font_color", Color(0.85, 0.78, 0.55))
-		vbox.add_child(lbl)
-
-
-# Lifecycle events log: birth, coming of age, marriages, widowing, death.
-# Compact one-line-per-event listing in chronological order.
-func _build_lifecycle(ch: Dictionary) -> void:
+func _build_history_tab(ch: Dictionary) -> Control:
+	var col := VBoxContainer.new()
+	col.name = "History"
+	col.add_theme_constant_override("separation", 4)
 	var cid: int = int(ch.get("character_id", 0))
-	if cid <= 0:
-		return
-	var events: Array = GameState.lifecycle_events_of(cid)
+	var events: Array = GameState.lifecycle_events_of(cid) if cid > 0 else []
 	if events.is_empty():
-		return
-	_section_header("Life events")
+		col.add_child(UITheme.dim_label("(no recorded life events)", 12))
+		return col
+	# Scrollable in case a long-lived character racks up many events.
+	var scroll := ScrollContainer.new()
+	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	col.add_child(scroll)
+	var list := VBoxContainer.new()
+	list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	list.add_theme_constant_override("separation", 2)
+	scroll.add_child(list)
 	for e in events:
-		var lbl := Label.new()
-		lbl.text = "  · %d — %s" % [int(e.get("year", 0)), _pretty_event(str(e.get("kind", "")))]
-		lbl.add_theme_font_size_override("font_size", 12)
-		lbl.add_theme_color_override("font_color", UITheme.COL_INK_DIM)
-		vbox.add_child(lbl)
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 12)
+		var year_lbl := UITheme.dim_label(str(int(e.get("year", 0))), 12)
+		year_lbl.custom_minimum_size.x = 60
+		row.add_child(year_lbl)
+		var kind_lbl := UITheme.text_label(_pretty_event(str(e.get("kind", ""))), 12)
+		row.add_child(kind_lbl)
+		list.add_child(row)
+	return col
 
 
 func _pretty_event(kind: String) -> String:
@@ -326,83 +341,91 @@ func _pretty_event(kind: String) -> String:
 	return kind
 
 
-# Actions the PLAYER character can take against the character currently
-# being viewed. If the player is looking at themselves, shows self-actions.
-# Each action becomes a button; pressing it calls GameState.submit_action.
-func _build_actions(ch: Dictionary) -> void:
-	var player_cid: int = GameState.player_character_id()
+# ── DIPLOMACY TAB ───────────────────────────────────────────────────────────
+
+func _build_diplomacy_tab(ch: Dictionary) -> Control:
+	var col := VBoxContainer.new()
+	col.name = "Diplomacy"
+	col.add_theme_constant_override("separation", 10)
 	var subject_cid: int = int(ch.get("character_id", 0))
-	if player_cid <= 0 or subject_cid <= 0:
-		return
-	if player_cid == subject_cid:
-		# Don't show actions on yourself for now — placeholder until
-		# self-actions (take vows, study, etc.) are designed.
-		return
-	var actions: Array = GameState.available_actions(player_cid, subject_cid)
-	# Show current opinion between actor and subject for context.
-	var op_yours: int = GameState.opinion_of(player_cid, subject_cid)
-	var op_theirs: int = GameState.opinion_of(subject_cid, player_cid)
-	_section_header("Diplomacy")
-	var op_row := Label.new()
-	op_row.text = "  your opinion: %+d   ·   their opinion: %+d" % [op_yours, op_theirs]
-	op_row.add_theme_font_size_override("font_size", 11)
-	op_row.add_theme_color_override("font_color", Color(0.65, 0.60, 0.50))
-	vbox.add_child(op_row)
-	if actions.is_empty():
-		var no_act := Label.new()
-		no_act.text = "  (no actions available — no liege/vassal link)"
-		no_act.add_theme_font_size_override("font_size", 11)
-		no_act.add_theme_color_override("font_color", Color(0.45, 0.40, 0.30))
-		vbox.add_child(no_act)
-		return
-	for a in actions:
-		var btn := Button.new()
-		btn.text = "  ▸  " + str(a.label)
-		btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
-		btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		btn.tooltip_text = str(a.description)
-		var key: String = str(a.key)
-		btn.pressed.connect(func(): _on_action_pressed(key, subject_cid))
-		vbox.add_child(btn)
+	var player_cid: int = GameState.player_character_id()
 
+	if player_cid > 0 and subject_cid > 0 and player_cid != subject_cid:
+		var op_yours: int = GameState.opinion_of(player_cid, subject_cid)
+		var op_theirs: int = GameState.opinion_of(subject_cid, player_cid)
+		col.add_child(UITheme.section_header("Opinion"))
+		var op_row := UITheme.text_label(
+			"Your opinion: %+d         Their opinion of you: %+d" % [op_yours, op_theirs],
+			12, UITheme.COL_INK)
+		col.add_child(op_row)
 
-# Incoming requests aimed at this character. Each pending row gets accept/
-# decline buttons; the resolution updates opinion in both directions.
-func _build_inbox(ch: Dictionary) -> void:
-	var cid: int = int(ch.get("character_id", 0))
-	var inbox: Array = GameState.pending_actions_for(cid)
+		col.add_child(UITheme.section_header("Actions"))
+		var actions: Array = GameState.available_actions(player_cid, subject_cid)
+		if actions.is_empty():
+			col.add_child(UITheme.dim_label("(no actions available — no liege/vassal link)", 11))
+		else:
+			for a in actions:
+				var btn := UITheme.styled_button("▸  " + str(a.label))
+				btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+				btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
+				btn.tooltip_text = str(a.description)
+				var key: String = str(a.key)
+				btn.pressed.connect(func(): _on_action_pressed(key, subject_cid))
+				col.add_child(btn)
+	elif player_cid == subject_cid:
+		col.add_child(UITheme.dim_label("This is you. Self-actions land in a later patch.", 11))
+
+	# Inbox — pending actions awaiting THIS character's response.
+	var inbox: Array = GameState.pending_actions_for(subject_cid)
+	col.add_child(UITheme.section_header("Inbox"))
 	if inbox.is_empty():
-		return
-	_section_header("Inbox")
-	for row in inbox:
-		var item := HBoxContainer.new()
-		item.add_theme_constant_override("separation", 6)
-		vbox.add_child(item)
-		var desc := Label.new()
-		var initiator: String = "%s %s" % [
-			str(row.get("initiator_given", "?")),
-			str(row.get("initiator_surname", "")),
-		]
-		desc.text = "  %s — %s" % [str(row.action_type), initiator.strip_edges()]
-		desc.add_theme_font_size_override("font_size", 12)
-		desc.add_theme_color_override("font_color", Color(0.85, 0.80, 0.65))
-		desc.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		item.add_child(desc)
-		var aid: int = int(row.id)
-		var accept := Button.new()
-		accept.text = "Accept"
-		accept.pressed.connect(func(): _resolve_inbox_item(aid, true))
-		item.add_child(accept)
-		var decline := Button.new()
-		decline.text = "Decline"
-		decline.pressed.connect(func(): _resolve_inbox_item(aid, false))
-		item.add_child(decline)
+		col.add_child(UITheme.dim_label("(no pending requests)", 11))
+	else:
+		for row in inbox:
+			var item := HBoxContainer.new()
+			item.add_theme_constant_override("separation", 6)
+			col.add_child(item)
+			var initiator: String = "%s %s" % [
+				str(row.get("initiator_given", "?")),
+				str(row.get("initiator_surname", "")),
+			]
+			var desc := UITheme.text_label(
+				"%s — from %s" % [str(row.action_type), initiator.strip_edges()],
+				12, UITheme.COL_INK)
+			desc.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			item.add_child(desc)
+			var aid: int = int(row.id)
+			var accept := UITheme.styled_button("Accept")
+			accept.pressed.connect(func(): _resolve_inbox_item(aid, true))
+			item.add_child(accept)
+			var decline := UITheme.styled_button("Decline")
+			decline.pressed.connect(func(): _resolve_inbox_item(aid, false))
+			item.add_child(decline)
+	return col
 
+
+# ── FOOTER ──────────────────────────────────────────────────────────────────
+
+func _build_footer(ch: Dictionary) -> void:
+	var sep := HSeparator.new()
+	_root.add_child(sep)
+	var btn_row := HBoxContainer.new()
+	btn_row.add_theme_constant_override("separation", 8)
+	_root.add_child(btn_row)
+	var tree_btn := UITheme.styled_button("🌳  Family tree")
+	tree_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	tree_btn.pressed.connect(func(): open_family_tree.emit(int(ch.get("character_id", 0))))
+	btn_row.add_child(tree_btn)
+	var close_btn := UITheme.styled_button("Close")
+	close_btn.pressed.connect(close)
+	btn_row.add_child(close_btn)
+
+
+# ── EVENT HANDLERS ──────────────────────────────────────────────────────────
 
 func _on_action_pressed(action_key: String, subject_cid: int) -> void:
 	var actor: int = GameState.player_character_id()
 	GameState.submit_action(action_key, actor, subject_cid, {})
-	# Rebuild so the opinion + inbox sections refresh.
 	_rebuild()
 
 
@@ -411,35 +434,56 @@ func _resolve_inbox_item(action_id: int, accept: bool) -> void:
 	_rebuild()
 
 
-func _build_footer(ch: Dictionary) -> void:
-	vbox.add_child(HSeparator.new())
-	var btn_row := HBoxContainer.new()
-	btn_row.add_theme_constant_override("separation", 8)
-	vbox.add_child(btn_row)
-	var tree_btn := Button.new()
-	tree_btn.text = "🌳 Family tree"
-	tree_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	tree_btn.pressed.connect(func(): open_family_tree.emit(int(ch.get("character_id", 0))))
-	btn_row.add_child(tree_btn)
-	var close_btn := Button.new()
-	close_btn.text = "Close"
-	close_btn.pressed.connect(close)
-	btn_row.add_child(close_btn)
+# ── SMALL HELPERS ───────────────────────────────────────────────────────────
+
+func _relation_label(kind: String, other: Dictionary) -> String:
+	var gender: String = str(other.get("gender", "male"))
+	match kind:
+		"spouse": return "Wife" if gender == "female" else "Husband"
+		"parent": return "Mother" if gender == "female" else "Father"
+		"child":  return "Daughter" if gender == "female" else "Son"
+		"sibling": return "Sister" if gender == "female" else "Brother"
+	return kind.capitalize()
 
 
-func _section_header(text: String) -> void:
-	var h := Label.new()
-	h.text = text.to_upper()
-	h.add_theme_font_size_override("font_size", 11)
-	h.add_theme_color_override("font_color", Color(0.85, 0.78, 0.55))
-	vbox.add_child(h)
-	var sep := HSeparator.new()
-	vbox.add_child(sep)
+func _relation_row(role: String, other: Dictionary) -> Control:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	var role_lbl := UITheme.dim_label(role, 12)
+	role_lbl.custom_minimum_size.x = 70
+	row.add_child(role_lbl)
+	var alive: bool = bool(other.get("alive", true))
+	var name_btn := Button.new()
+	var full: String = (str(other.get("given_name", "")) + " "
+			+ str(other.get("surname", ""))).strip_edges()
+	if not alive:
+		full += " ✝"
+	name_btn.text = full + "  · " + str(int(other.get("age", 0)))
+	name_btn.flat = true
+	name_btn.add_theme_font_size_override("font_size", 13)
+	name_btn.add_theme_color_override("font_color",
+			UITheme.COL_INK_DEAD if not alive else UITheme.COL_INK)
+	name_btn.add_theme_color_override("font_hover_color", UITheme.COL_BUTTON_HOVER)
+	name_btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	name_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	name_btn.pressed.connect(func(): navigate_to.emit(int(other.get("character_id", 0))))
+	row.add_child(name_btn)
+	return row
 
 
-func _label(text: String, font_size: int, color: Color) -> void:
-	var l := Label.new()
-	l.text = text
-	l.add_theme_font_size_override("font_size", font_size)
-	l.add_theme_color_override("font_color", color)
-	vbox.add_child(l)
+func _pretty_region(r: Dictionary) -> String:
+	var rid: String = str(r.region_id)
+	match str(r.region_type):
+		"country": return rid.capitalize()
+		"duchy":
+			var d: Dictionary = MapData.duchies.get(rid, {})
+			return str(d.get("name", rid))
+		"county":  return rid
+		"barony":
+			var dd: Node = get_node_or_null("/root/DesignData")
+			if dd != null:
+				var b: Dictionary = dd.baronies.get(rid, {})
+				if "name" in b:
+					return "%s (%s)" % [str(b.name), rid]
+			return rid
+	return rid

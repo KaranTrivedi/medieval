@@ -79,9 +79,18 @@ func new_game(player_id: String) -> void:
 	_create_schema()
 	if not MapData.is_loaded:
 		await MapData.map_loaded
+	# Wrap the seed in a single SQLite transaction. Without this, every
+	# INSERT issues its own commit, which on Windows can take 5-30 ms per
+	# statement and turns the 3000-row seed into multi-second wall time.
+	# A single transaction collapses that to a few hundred milliseconds.
+	var seed_started_us: int = Time.get_ticks_usec()
+	db.query("BEGIN;")
 	_seed()
+	db.query("COMMIT;")
+	@warning_ignore("integer_division")
+	var seed_ms: int = (Time.get_ticks_usec() - seed_started_us) / 1000
 	print("GameState: new game started for ", player_id,
-			" — turn=", current_turn())
+			" — turn=", current_turn(), " (seed %d ms)" % seed_ms)
 	state_changed.emit()
 
 

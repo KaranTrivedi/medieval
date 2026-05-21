@@ -48,6 +48,9 @@ func show_for(character_id: int) -> void:
 	_focus_id = character_id
 	_rebuild()
 	visible = true
+	var p := get_parent()
+	if p != null:
+		p.move_child(self, p.get_child_count() - 1)
 
 
 func close() -> void:

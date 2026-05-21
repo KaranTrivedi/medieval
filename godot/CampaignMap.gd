@@ -173,12 +173,27 @@ func build_map():
 	if not MapData.is_loaded:
 		push_error("MapData failed to load — check res://data/gb_godot.json")
 		return
-	
-	print("Building polygons...")
+
+	# Time each stage so the user can see where load time is going on F5.
+	# Baronies are deferred to call_deferred() — they're the heaviest stage
+	# (~630ms for 532 outlines + 379 curved labels) but invisible at the
+	# default zoom, so we let the first frame render with country/duchy/
+	# county data and stream the barony layer in on the next tick.
+	var t0: int = Time.get_ticks_usec()
 	MapData.build_county_polygons(county_layer, Vector2(4, 4))
+	var t1: int = Time.get_ticks_usec()
 	MapData.build_county_borders(border_layer, Vector2(4, 4))
-	MapData.build_baronies(border_layer, label_layer, Vector2(4, 4))
+	var t2: int = Time.get_ticks_usec()
 	MapData.build_labels(label_layer, Vector2(4, 4))
+	var t3: int = Time.get_ticks_usec()
+	@warning_ignore("integer_division")
+	print("BuildMap timings: counties=%d ms, borders=%d ms, labels=%d ms, total=%d ms (baronies deferred)" % [
+		(t1 - t0) / 1000, (t2 - t1) / 1000, (t3 - t2) / 1000, (t3 - t0) / 1000
+	])
+	# Defer the heavy barony build to the next frame so the player sees the
+	# map immediately. _build_baronies_deferred fires once map_loaded has
+	# happened and CampaignMap has rendered its first frame.
+	call_deferred("_build_baronies_deferred")
 
 	# Quick scene-tree audit so the build summary actually reflects everything
 	# (county fills + barony outlines, both dashed and solid).
@@ -204,6 +219,20 @@ func build_map():
 	_update_border_widths()
 	print("Camera: position=%v, zoom=%v" % [camera.position, camera.zoom])
 	print("=== build_map() END ===")
+
+
+# Build the deep-zoom barony layer (outlines + curved labels) one frame
+# after build_map returns. Lets the player see the country/duchy/county map
+# immediately while the 600+ ms barony work streams in.
+func _build_baronies_deferred() -> void:
+	var t_start: int = Time.get_ticks_usec()
+	MapData.build_baronies(border_layer, label_layer, Vector2(4, 4))
+	@warning_ignore("integer_division")
+	print("Barony layer streamed in: %d ms" % ((Time.get_ticks_usec() - t_start) / 1000))
+	# Force a border-width refresh so deferred baronies pick up the current zoom.
+	_last_border_zoom = -1.0
+	_update_border_widths()
+	_update_label_visibility()
 
 
 # Rescale every Line2D in BorderLayer so its width measured in SCREEN pixels
