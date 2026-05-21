@@ -364,12 +364,12 @@ func build_county_polygons(parent: Node2D, world_scale: Vector2 = Vector2(4, 4))
 	# Pull colours directly from MapData.duchies (populated from gb_godot.json)
 	# so adding new duchies in the data file works without touching this code.
 	#
-	# Why fully opaque now: when the fill was 0.65 alpha, low-saturation
-	# duchies (e.g. Lothian gold #4a4a14) blended with the default gray
-	# clear-colour to a near-identical gray, making whole counties read as
-	# "missing land". Once we have a parchment background sprite covering
-	# the bbox, we can drop alpha back to ~0.9 to let it show through.
-	const FILL_ALPHA := 1.0
+	# Alpha is intentionally <1 so the parchment background grain shows
+	# through the polygon fills — gives the map a "drawn on paper" look
+	# rather than flat slabs of colour. 0.88 is the empirical sweet spot:
+	# darker duchy colours still read as their own hue, but the underlying
+	# texture is still visible.
+	const FILL_ALPHA := 0.88
 	var duchy_colors: Dictionary = {}
 	for did in duchies:
 		var hex := str(duchies[did].get("color", "#666666"))

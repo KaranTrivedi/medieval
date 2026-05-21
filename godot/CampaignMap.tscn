@@ -36,13 +36,19 @@ corner_radius_bottom_left = 2
 [node name="CampaignMap" type="Node2D" unique_id=215796415]
 script = ExtResource("1_bvam6")
 
-[node name="CountyLayer" type="Node2D" parent="." unique_id=1787511703]
+[node name="Background" type="CanvasLayer" parent="."]
+layer = -100
 
-[node name="Sprite2D" type="Sprite2D" parent="CountyLayer" unique_id=815277412]
-visible = false
-scale = Vector2(8, 8)
+[node name="Parchment" type="TextureRect" parent="Background"]
 texture = ExtResource("4_brjqc")
-offset = Vector2(300, 500)
+stretch_mode = 1
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_right = 0.0
+offset_bottom = 0.0
+mouse_filter = 2
+
+[node name="CountyLayer" type="Node2D" parent="." unique_id=1787511703]
 
 [node name="BorderLayer" type="Node2D" parent="." unique_id=1628466703]
 

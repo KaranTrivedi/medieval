@@ -2,7 +2,7 @@
 
 Captain's log for cross-chat continuity. Read this before doing any work in a fresh session. Update at the end of each session.
 
-**Last touched:** 2026-05-21 — Big UX + economy pass: killed the right-side InfoPanel (replaced with a rich hover tooltip), region clicks now open RegionPanel directly, candidate compare table for office appointments, Lord (liege chain) section in CharacterPanel, action side-effects (esp. `appoint_office`), `×5` income bump + retinue/upkeep economy, and `godot/` folder reorg into `panels/` + `ui/` + `tools/` + `docs/`.
+**Last touched:** 2026-05-21 (evening) — Map appearance pass: parchment background tiled in screen space, polygons dropped to alpha 0.88 so the grain shows through, hover highlight on the region under the cursor, overlay-mode system (Political / Geographic / Fertility / Wealth) with zoom-aware aggregation (sum for wealth, mean for fertility), and TopBar economy chips (💰 income, 🌾 mean fertility) that double as overlay switchers. Ctrl+Tab cycles, Ctrl+Shift+Tab reverses. Devastation red-wash is wired but the data hook is still a stub pending the economy rework.
 
 ---
 
@@ -114,8 +114,30 @@ All four modals unified at **880×640** with Close (`✕`) pinned top-right. The
 | `panels/court_panel.gd` | Header (monarch + Close), Great Offices section with same DataTable picker, Direct Vassals list. |
 
 **Map interaction:**
-- **Hover** any region for ~500 ms → rich tooltip with name/tier/holder/age/income/population/garrison. Hover delay timer in `CampaignMap.gd` (`HOVER_DELAY = 0.5`).
+- **Hover** any region → polygons get a soft warm `HOVER_TINT` modulate (separate from `SELECTED_TINT` so the player can tell the difference at a glance). After 500 ms of stable hover, a rich tooltip appears with name/tier/holder/age/income/population/garrison.
 - **Click** a region → directly opens `RegionPanel`. The old right-side InfoPanel was removed; `ui_panel.gd` is now a slim CanvasLayer stub that keeps the existing .tscn script reference valid.
+
+**Overlay modes** (driven by `_overlay_mode` in CampaignMap.gd, default = `political`):
+
+| Mode | Colour function | Aggregation at country / duchy zoom |
+|---|---|---|
+| `political` | Faction colour (England red, Wales green, Scotland blue) from `DesignData.factions_by_duchy`. | n/a — already faction-uniform. |
+| `geographic` | Duchy colour from `MapData.duchies[did].color`. | n/a — already duchy-uniform. |
+| `fertility` | Lerp `OVERLAY_FERTILITY_LO` (dry yellow) → `OVERLAY_FERTILITY_HI` (lush green) by normalised fertility `(f − 0.5)`. | **Mean** across constituent counties. |
+| `wealth` | Lerp `OVERLAY_WEALTH_LO` (dark gold) → `OVERLAY_WEALTH_HI` (bright gold) by `income / max_in_band`. | **Sum** across constituent counties. |
+
+Devastated counties (red wash) are overlaid on `fertility` / `wealth`. `_devastated_lookup()` returns an empty set today — flip it on once the economy rework adds the column.
+
+Repaint triggers: mode change, zoom-band crossing (handled inside `_update_label_visibility`), and `GameState.state_changed` (turn end → fertility shifted).
+
+**Overlay UI:**
+- Four chips in the TopBar (👑 Political · 📜 Geographic · 💰 Wealth · 🌾 Fertility). Active chip glows gold; others are dim. Wealth + Fertility chips also display the player faction's running totals (sum income / mean fertility).
+- Chips emit `overlay_requested(mode)`; CampaignMap calls `set_overlay_mode` then echoes back to TopBar via `set_active_overlay(mode)` so the chip lights stay in sync.
+- **Ctrl+Tab** cycles forward through `OVERLAY_MODES`; **Ctrl+Shift+Tab** reverses. Handled in `_unhandled_input` before the regular keycode match so Tab isn't eaten by Control focus traversal.
+
+**Parchment background:**
+- Screen-space tiled `TextureRect` (`stretch_mode = STRETCH_TILE`) inside a `Background` `CanvasLayer` at `layer = -100`, sitting behind the world Node2D. Texture is `assets/page_seamless_01.png`.
+- County polygon alpha is `0.88` (down from `1.0` in `MapData.build_county_polygons`) so the parchment grain shows through every overlay mode.
 
 ### Cross-panel patterns
 - **NavRouter** (`nav_router.gd`, Node under `UI/Control`) owns the back/forward history (max 64). Every open call routes through it. **mouse4 / mouse5** wired in `NavRouter._input` (NOT `CampaignMap._unhandled_input` — panels would swallow it).
@@ -200,6 +222,16 @@ Two key read APIs:
 
 ---
 
+## Economy rework (NEXT — explicitly paused this session)
+
+The user has flagged the economy needs a re-design: "treasury etc. doesnt make any sense. Needs to be allocated properly." Retinue / troop counts are also slated to be replaced with lord-specific troop types. Don't extend the current `_advance_personal_economy` or `retinues` model — just leave it ticking until the rework starts.
+
+Two hooks already in place for that work:
+- `_devastated_lookup()` in CampaignMap.gd — currently returns `{}`. Add a `devastated` column (or its equivalent) to `counties_state`, query it here, and the red overlay wash + "no yield" semantics light up automatically.
+- `faction_economy_summary(faction_id)` in GameState.gd — single-call summary used by the TopBar chips. Extend as needed (e.g. add `total_upkeep`, `net_per_turn`).
+
+---
+
 ## WIP (carries between chats)
 
 - **AI ambition driver still TODO.** Characters carry hidden ambitions but nothing acts on them yet. Next step: in `_advance_lifecycle`, characters with `attain_office` ambitions periodically submit `appoint_office` requests (now meaningful! — payload-aware).
@@ -227,6 +259,10 @@ Two key read APIs:
 
 ## Recent design decisions
 
+- **2026-05-21 (evening)**: Hover modulate (`HOVER_TINT`) added per-polygon; widens with zoom band (hovering a country lights up every county in that country, etc.). Distinct from `SELECTED_TINT` and never overrides it.
+- **2026-05-21 (evening)**: Overlay-mode system — Political (default) / Geographic / Fertility / Wealth — with zoom-band aggregation. Country/duchy zoom aggregates the constituent counties (sum for wealth, mean for fertility). Devastation red wash is plumbed but the data hook is a stub until the economy rework.
+- **2026-05-21 (evening)**: Faction economy chips in TopBar (💰 income, 🌾 fertility) double as overlay switchers. Ctrl+Tab cycles modes; chip click sets directly.
+- **2026-05-21 (evening)**: Parchment background — screen-space tiled `TextureRect` at CanvasLayer `layer = -100`. Polygon alpha dropped to 0.88 so grain shows through.
 - **2026-05-21 (PM)**: Right-side InfoPanel removed. Map clicks open `RegionPanel` directly; long-hover (~500 ms) shows a rich tooltip with the info the InfoPanel used to carry. `ui_panel.gd` is now a slim stub script kept for scene-script compatibility.
 - **2026-05-21 (PM)**: DataTable first-click defaults to DESCENDING (largest-first is the answer the player usually wants for income/age/garrison). Subsequent clicks toggle.
 - **2026-05-21 (PM)**: Office appointment picker upgraded to a sortable comparison DataTable — Name, Age, House, Tier, Prestige, compact M/D/S/I/P stats, opinion-of-liege, current office. Picker header surfaces the office's "key stat" so the player knows which column matters.

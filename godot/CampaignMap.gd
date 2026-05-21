@@ -21,7 +21,43 @@ const WORLD_SCALE := Vector2(4, 4)
 # Tint applied to all Polygon2D nodes that share the currently-selected county
 # name. Multiplied with their base colour, so values >1 brighten.
 const SELECTED_TINT := Color(1.45, 1.25, 0.85)
+# Softer brightness bump applied to the polygon under the cursor while the
+# tooltip is still pending. Distinct from SELECTED_TINT so the player can tell
+# at a glance which region is "active" vs "merely hovered".
+const HOVER_TINT := Color(1.18, 1.14, 1.02)
 const NORMAL_TINT := Color.WHITE
+
+# Overlay modes — drives which colour function paints the county polygons.
+# Default is POLITICAL (faction ownership); GEOGRAPHIC is the original duchy-
+# coloured view, kept around as one of the overlay options.
+const OVERLAY_POLITICAL := "political"
+const OVERLAY_GEOGRAPHIC := "geographic"
+const OVERLAY_FERTILITY := "fertility"
+const OVERLAY_WEALTH := "wealth"
+const OVERLAY_MODES := [
+	OVERLAY_POLITICAL, OVERLAY_GEOGRAPHIC,
+	OVERLAY_FERTILITY, OVERLAY_WEALTH,
+]
+# Human-friendly labels surfaced in the TopBar chip text. Indexed by mode key.
+const OVERLAY_LABELS := {
+	OVERLAY_POLITICAL: "Political",
+	OVERLAY_GEOGRAPHIC: "Geographic",
+	OVERLAY_FERTILITY: "Fertility",
+	OVERLAY_WEALTH: "Wealth",
+}
+
+# Overlay gradients. Each pair is (LOW value colour, HIGH value colour). When
+# painting a county we lerp from low → high using the normalised value of
+# fertility (or wealth) at the relevant aggregation tier.
+const OVERLAY_FERTILITY_LO := Color(0.90, 0.82, 0.30)   # dry yellow
+const OVERLAY_FERTILITY_HI := Color(0.30, 0.65, 0.30)   # lush green
+const OVERLAY_WEALTH_LO := Color(0.40, 0.32, 0.10)      # dark gold
+const OVERLAY_WEALTH_HI := Color(0.95, 0.88, 0.30)      # bright gold
+
+# Red wash applied OVER fertility/wealth modes for counties flagged as
+# devastated (no yield this turn). Read via `_is_devastated(name)` — the
+# data hook is a stub for now, will fill in when the economy is reworked.
+const OVERLAY_DEVASTATED := Color(0.80, 0.18, 0.15)
 
 # Barony outlines are dark + thin — a modulate-style tint isn't visible on
 # them. So we swap the line colour directly to bright yellow, AND fatten
@@ -76,6 +112,19 @@ var _last_zoom_band: int = -1
 var _hover_timer: Timer
 var _pending_hover: Dictionary = {}
 
+# Set of county names currently highlighted by hover (NOT selection). Lets
+# us flip only the polygons that need it on hover-target change instead of
+# walking all ~3000 county polygons every motion event.
+var _hover_counties: Dictionary = {}
+
+# Active overlay-mode key, one of OVERLAY_MODES. Drives _apply_overlay.
+var _overlay_mode: String = OVERLAY_POLITICAL
+
+# Cached max wealth across all counties — set lazily on first paint of the
+# wealth overlay so the lerp normalises against the actual range, not a
+# hard-coded maximum. Invalidated when GameState emits state_changed.
+var _max_county_income: int = 0
+
 # Last zoom value at which we rescaled Line2D widths. We only rescale when the
 # zoom changes by more than a small relative threshold to avoid touching ~600
 # Line2D nodes every single frame for sub-pixel jitter.
@@ -95,6 +144,10 @@ func _ready():
 	_hover_timer.wait_time = HOVER_DELAY
 	_hover_timer.timeout.connect(_on_hover_timeout)
 	add_child(_hover_timer)
+	# Repaint the overlay whenever the simulation advances (turn end shifts
+	# fertility + future devastation flags). Connecting here means we don't
+	# have to thread state through end_turn → TopBar → map.
+	GameState.state_changed.connect(_on_state_changed)
 	# Hook every panel's navigation signals into NavRouter so back / forward
 	# (mouse4 / mouse5) walks the visit history. The NavRouter node owns the
 	# stack; panels just emit their navigate intents.
@@ -118,6 +171,9 @@ func _ready():
 	var top_bar: Node = ui.get_node_or_null("Control/TopBar")
 	if top_bar != null and top_bar.has_signal("open_court_requested"):
 		top_bar.open_court_requested.connect(_on_open_court_requested)
+	# TopBar overlay chips → switch the active map overlay.
+	if top_bar != null and top_bar.has_signal("overlay_requested"):
+		top_bar.overlay_requested.connect(set_overlay_mode)
 	if MapData.is_loaded:
 		build_map()
 	else:
@@ -240,8 +296,21 @@ func build_map():
 	fit_to_bounds()
 	_update_label_visibility()
 	_update_border_widths()
+	# Paint the initial overlay (default = political). Has to run AFTER the
+	# polygons exist — that's why it lives down here, not in _ready.
+	_apply_overlay()
 	print("Camera: position=%v, zoom=%v" % [camera.position, camera.zoom])
 	print("=== build_map() END ===")
+
+
+# GameState fired state_changed (turn end / appointment / opinion shift).
+# Most state changes don't affect the map colouring, but fertility +
+# devastation do — repainting on every state_changed is cheap and avoids
+# threading a more granular signal through.
+func _on_state_changed() -> void:
+	if county_layer.get_child_count() == 0:
+		return
+	_apply_overlay()
 
 
 # Build the deep-zoom barony layer (outlines + curved labels) one frame
@@ -315,6 +384,9 @@ func _update_label_visibility() -> void:
 		# Re-evaluate the tooltip too: the same world point now maps to a
 		# different tier.
 		_update_tooltip(get_viewport().get_mouse_position(), get_global_mouse_position())
+		# Aggregation level just changed — repaint colours so country /
+		# duchy / county tiers each show their proper grouped shading.
+		_apply_overlay()
 	_last_zoom_band = band
 	var want_country := (band == 0)
 	var want_duchy   := (band == 1)
@@ -429,7 +501,15 @@ func _unhandled_input(event: InputEvent) -> void:
 		else:
 			_update_tooltip(mm.position, get_global_mouse_position())
 	elif event is InputEventKey and event.pressed and not event.echo:
-		match (event as InputEventKey).keycode:
+		var key_event := event as InputEventKey
+		# Ctrl+Tab / Ctrl+Shift+Tab cycle overlay modes. Handled here (before
+		# the match) because Tab is otherwise eaten by Control focus
+		# traversal, and we want the bind to feel app-global.
+		if key_event.keycode == KEY_TAB and key_event.ctrl_pressed:
+			cycle_overlay_mode(not key_event.shift_pressed)
+			get_viewport().set_input_as_handled()
+			return
+		match key_event.keycode:
 			KEY_ESCAPE:
 				_clear_selection()
 			KEY_F:
@@ -667,6 +747,7 @@ func _update_tooltip(screen_pos: Vector2, world_pos: Vector2) -> void:
 	if hit.is_empty():
 		_pending_hover = {}
 		tooltip.visible = false
+		_apply_hover_highlight({})
 		if _hover_timer != null:
 			_hover_timer.stop()
 		return
@@ -681,8 +762,10 @@ func _update_tooltip(screen_pos: Vector2, world_pos: Vector2) -> void:
 		# Mouse drifted within the same region — leave tooltip as-is (visible
 		# if the timer has already fired, hidden if not). Just track position.
 		return
-	# New target → wipe any stale tooltip and restart the delay.
+	# New target → wipe any stale tooltip, repaint the hover highlight, and
+	# restart the delay timer that will eventually show the rich tooltip.
 	tooltip.visible = false
+	_apply_hover_highlight(hit)
 	if _hover_timer != null:
 		_hover_timer.start()
 
@@ -772,6 +855,316 @@ func _hide_tooltip() -> void:
 		_hover_timer.stop()
 	if tooltip != null:
 		tooltip.visible = false
+	# Drop the hover highlight too — otherwise a polygon stays warm-tinted
+	# after the cursor leaves it (e.g. when the user starts panning).
+	_apply_hover_highlight({})
+
+
+# ── HOVER HIGHLIGHT ──────────────────────────────────────────────────────────
+
+# Resolve a hit (from _hit_test_at_band) into the SET of county names that
+# should be hover-tinted. The set widens with the zoom band — at country
+# tier we light up every county in the country; at county/barony tier just
+# the one. Empty hit returns an empty set (used by _hide_tooltip to clear).
+func _counties_for_hit(hit: Dictionary) -> Dictionary:
+	var out: Dictionary = {}
+	if hit.is_empty():
+		return out
+	var t: String = str(hit.get("type", ""))
+	var id: String = str(hit.get("id", ""))
+	match t:
+		"country":
+			for cn in MapData.counties:
+				var d: String = str(MapData.counties[cn].get("duchy", ""))
+				if MapData.COUNTRY_BY_DUCHY.get(d, "") == id:
+					out[cn] = true
+		"duchy":
+			for cn in MapData.counties:
+				if str(MapData.counties[cn].get("duchy", "")) == id:
+					out[cn] = true
+		"county":
+			out[id] = true
+		"barony":
+			# Hover at barony tier still warms the parent county — the
+			# barony outline glow is handled separately by _select_barony.
+			out[str(hit.get("county", ""))] = true
+	return out
+
+
+# Repaint hover modulate. Counties leaving the hover set go back to
+# NORMAL_TINT (or SELECTED_TINT if currently selected); counties entering
+# get HOVER_TINT. Walks county_layer once per change — fast for the typical
+# zoom band where only a handful of polygons are involved.
+func _apply_hover_highlight(hit: Dictionary) -> void:
+	var new_set: Dictionary = _counties_for_hit(hit)
+	if new_set.is_empty() and _hover_counties.is_empty():
+		return
+	for child in county_layer.get_children():
+		if not (child is Polygon2D):
+			continue
+		var cn: String = str(child.get_meta("county_name", ""))
+		if cn == "":
+			continue
+		var was_hovered: bool = _hover_counties.has(cn)
+		var is_hovered: bool = new_set.has(cn)
+		if was_hovered == is_hovered:
+			continue
+		# Selection wins over hover — don't stomp the SELECTED_TINT on a
+		# polygon that's part of the active selection.
+		var is_selected: bool = _county_in_selection(cn)
+		if is_selected:
+			continue
+		(child as Polygon2D).modulate = HOVER_TINT if is_hovered else NORMAL_TINT
+	_hover_counties = new_set
+
+
+# True iff the given county is part of the active multi-county selection
+# (country / duchy) or is itself the selected county. Used by
+# _apply_hover_highlight to avoid overwriting the SELECTED_TINT.
+func _county_in_selection(cn: String) -> bool:
+	match _selected_type:
+		"county":
+			return cn == _selected_county_name
+		"duchy":
+			return str(MapData.counties.get(cn, {}).get("duchy", "")) == _selected_duchy
+		"country":
+			var d: String = str(MapData.counties.get(cn, {}).get("duchy", ""))
+			return MapData.COUNTRY_BY_DUCHY.get(d, "") == _selected_country
+		"barony":
+			# Parent county gets a soft warm tint when a barony is selected.
+			# It IS in the "selected" group from _select_barony's perspective.
+			# Loosely conservative: treat as not-selected so hover still works.
+			return false
+	return false
+
+
+# ── OVERLAY MODES ────────────────────────────────────────────────────────────
+
+# Switch the active overlay and immediately repaint. Public API used by the
+# TopBar chips and the Ctrl+Tab cycle binding.
+func set_overlay_mode(mode: String) -> void:
+	if mode == _overlay_mode:
+		return
+	if not OVERLAY_MODES.has(mode):
+		return
+	_overlay_mode = mode
+	_apply_overlay()
+	# Mirror the change into the TopBar chip strip so the active chip lights
+	# up regardless of whether the mode was switched via chip click, Ctrl+Tab,
+	# or external script.
+	var top_bar: Node = ui.get_node_or_null("Control/TopBar")
+	if top_bar != null and top_bar.has_method("set_active_overlay"):
+		top_bar.set_active_overlay(mode)
+
+
+# Cycle through OVERLAY_MODES. `forward=true` advances, `false` retreats.
+# Bound to Ctrl+Tab / Ctrl+Shift+Tab in _unhandled_input.
+func cycle_overlay_mode(forward: bool = true) -> void:
+	var idx: int = OVERLAY_MODES.find(_overlay_mode)
+	if idx < 0:
+		idx = 0
+	var n: int = OVERLAY_MODES.size()
+	idx = (idx + 1) % n if forward else (idx - 1 + n) % n
+	set_overlay_mode(str(OVERLAY_MODES[idx]))
+
+
+# Walk county_layer and recolour every Polygon2D per the current overlay
+# mode + zoom aggregation tier. Called when:
+#   - overlay mode changes
+#   - zoom band crosses a threshold (so country/duchy aggregates re-derive)
+#   - GameState.state_changed fires (turn end — fertility/wealth shifted)
+func _apply_overlay() -> void:
+	# Invalidate the cached max so wealth normalises against current values.
+	_max_county_income = 0
+	# Per-county fertility lookup — one DB hit, then in-memory walks. We
+	# never need fertility for the GEOGRAPHIC / POLITICAL modes, so skip
+	# the query in those cases to keep mode-switches cheap.
+	var fert: Dictionary = {}
+	if _overlay_mode == OVERLAY_FERTILITY:
+		fert = _fertility_lookup()
+	var devastated: Dictionary = _devastated_lookup()
+	var band: int = _label_band()
+	for child in county_layer.get_children():
+		if not (child is Polygon2D):
+			continue
+		var cn: String = str(child.get_meta("county_name", ""))
+		if cn == "":
+			continue
+		var col: Color = _color_for_county(cn, band, fert, devastated)
+		(child as Polygon2D).color = col
+
+
+# Compute the polygon fill colour for a single county under the current
+# overlay mode + zoom band. Aggregation widens with the band:
+#   COUNTRY band → colour from country-level aggregate
+#   DUCHY band   → colour from duchy-level aggregate
+#   COUNTY/BARONY band → per-county value
+# Devastated counties get the red wash on the FERTILITY / WEALTH modes —
+# political / geographic modes don't react to devastation.
+func _color_for_county(cn: String, band: int,
+		fert: Dictionary, devastated: Dictionary) -> Color:
+	var co: Dictionary = MapData.counties.get(cn, {})
+	var duchy_id: String = str(co.get("duchy", ""))
+	# Alpha matches the duchy-fill choice in build_county_polygons so the
+	# parchment grain still shows through overlays.
+	var alpha: float = 0.88
+	match _overlay_mode:
+		OVERLAY_POLITICAL:
+			var faction_id: String = str(DesignData.factions_by_duchy.get(duchy_id, ""))
+			var c: Color = _faction_color(faction_id)
+			c.a = alpha
+			return c
+		OVERLAY_GEOGRAPHIC:
+			var hex: String = str(MapData.duchies.get(duchy_id, {}).get("color", "#666666"))
+			var c2: Color = Color.html(hex) if hex.begins_with("#") else Color(0.2, 0.2, 0.2)
+			c2.a = alpha
+			return c2
+		OVERLAY_FERTILITY:
+			if devastated.has(cn):
+				var dv := OVERLAY_DEVASTATED
+				dv.a = alpha
+				return dv
+			var f: float = _fertility_for_band(cn, band, fert)
+			# Normalise: fertility around 1.0 is "average". Map [0.5, 1.5] → [0, 1].
+			var t: float = clampf((f - 0.5) / 1.0, 0.0, 1.0)
+			var col := OVERLAY_FERTILITY_LO.lerp(OVERLAY_FERTILITY_HI, t)
+			col.a = alpha
+			return col
+		OVERLAY_WEALTH:
+			if devastated.has(cn):
+				var dv2 := OVERLAY_DEVASTATED
+				dv2.a = alpha
+				return dv2
+			var w: int = _wealth_for_band(cn, band)
+			var max_w: int = _max_wealth_for_band(band)
+			var tw: float = 0.0
+			if max_w > 0:
+				tw = clampf(float(w) / float(max_w), 0.0, 1.0)
+			var colw := OVERLAY_WEALTH_LO.lerp(OVERLAY_WEALTH_HI, tw)
+			colw.a = alpha
+			return colw
+	# Fallback shouldn't happen.
+	return Color(0.2, 0.2, 0.2, alpha)
+
+
+# Faction colour lookup from DesignData.faction_seed (canonical source).
+# Cached on the side via a static dict initialised on first call.
+static var _faction_color_cache: Dictionary = {}
+func _faction_color(faction_id: String) -> Color:
+	if _faction_color_cache.is_empty():
+		for f in DesignData.faction_seed:
+			var hex: String = str(f.get("color_hex", "#666666"))
+			_faction_color_cache[str(f.get("id", "")).to_lower()] = Color.html(hex)
+	return _faction_color_cache.get(faction_id.to_lower(), Color(0.4, 0.4, 0.4))
+
+
+# Per-county fertility at the requested aggregation band. For COUNTRY /
+# DUCHY bands we average across the constituent counties so all polygons
+# in the group come out the same shade.
+func _fertility_for_band(cn: String, band: int, fert: Dictionary) -> float:
+	if band <= 1:
+		# Country / duchy: average siblings.
+		var d: String = str(MapData.counties.get(cn, {}).get("duchy", ""))
+		var country: String = str(MapData.COUNTRY_BY_DUCHY.get(d, ""))
+		var sum: float = 0.0
+		var n: int = 0
+		for other_cn in MapData.counties:
+			var od: String = str(MapData.counties[other_cn].get("duchy", ""))
+			var oc: String = str(MapData.COUNTRY_BY_DUCHY.get(od, ""))
+			var in_group: bool = (
+				(band == 0 and oc == country)
+				or (band == 1 and od == d)
+			)
+			if in_group:
+				sum += float(fert.get(other_cn, 1.0))
+				n += 1
+		return sum / max(n, 1)
+	return float(fert.get(cn, 1.0))
+
+
+# Per-county wealth at the requested aggregation band. SUM across the
+# group (income aggregates additively up the hierarchy).
+func _wealth_for_band(cn: String, band: int) -> int:
+	if band <= 1:
+		var d: String = str(MapData.counties.get(cn, {}).get("duchy", ""))
+		var country: String = str(MapData.COUNTRY_BY_DUCHY.get(d, ""))
+		var sum: int = 0
+		for other_cn in MapData.counties:
+			var od: String = str(MapData.counties[other_cn].get("duchy", ""))
+			var oc: String = str(MapData.COUNTRY_BY_DUCHY.get(od, ""))
+			var in_group: bool = (
+				(band == 0 and oc == country)
+				or (band == 1 and od == d)
+			)
+			if in_group:
+				sum += int(MapData.counties[other_cn].get("income", 0))
+		return sum
+	return int(MapData.counties.get(cn, {}).get("income", 0))
+
+
+# Maximum wealth across all REGIONS at the current band. Used to normalise
+# the lerp so the brightest region sits at the gradient's top end. Cached
+# per-paint via _max_county_income; reset at the top of _apply_overlay.
+func _max_wealth_for_band(band: int) -> int:
+	if _max_county_income > 0:
+		return _max_county_income
+	var max_v: int = 0
+	if band <= 0:
+		# Country tier: compare three country totals.
+		var totals: Dictionary = {}
+		for cn in MapData.counties:
+			var d: String = str(MapData.counties[cn].get("duchy", ""))
+			var c: String = str(MapData.COUNTRY_BY_DUCHY.get(d, ""))
+			totals[c] = int(totals.get(c, 0)) + int(MapData.counties[cn].get("income", 0))
+		for v in totals.values():
+			max_v = maxi(max_v, int(v))
+	elif band == 1:
+		# Duchy tier: per-duchy totals.
+		var duchy_totals: Dictionary = {}
+		for cn in MapData.counties:
+			var d2: String = str(MapData.counties[cn].get("duchy", ""))
+			duchy_totals[d2] = int(duchy_totals.get(d2, 0)) + int(MapData.counties[cn].get("income", 0))
+		for v in duchy_totals.values():
+			max_v = maxi(max_v, int(v))
+	else:
+		for cn in MapData.counties:
+			max_v = maxi(max_v, int(MapData.counties[cn].get("income", 0)))
+	_max_county_income = max_v
+	return max_v
+
+
+# Pull every county's fertility out of GameState.counties_state in a single
+# query. Returns {county_name: fertility_float}. Cheap — ~55 rows.
+func _fertility_lookup() -> Dictionary:
+	var out: Dictionary = {}
+	if GameState.db == null:
+		return out
+	GameState.db.query("SELECT county_id, fertility FROM counties_state;")
+	for row in GameState.db.query_result:
+		out[str(row["county_id"])] = float(row["fertility"])
+	return out
+
+
+# Stub for the "devastated" flag (red wash over fertility/wealth modes).
+# Returns the set of devastated county names. Today this is always empty
+# — the column will land alongside the upcoming economy rework. The render
+# pipeline reads through this helper so flipping it on is a one-line change.
+func _devastated_lookup() -> Dictionary:
+	return {}
+
+
+# Mirror of _update_label_visibility's band computation so the overlay code
+# can read the same number without duplicating the threshold logic. Kept
+# private so the overlay layer doesn't drift from the label layer.
+func _label_band() -> int:
+	var z: float = camera.zoom.x if camera != null else 0.0
+	if z < MapSettings.country_zoom_max:
+		return 0
+	if z < MapSettings.duchy_zoom_max:
+		return 1
+	if z < MapSettings.county_zoom_max:
+		return 2
+	return 3
 
 
 func _county_polygon_at(world_pos: Vector2) -> Polygon2D:
