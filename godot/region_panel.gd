@@ -80,7 +80,7 @@ func _rebuild() -> void:
 	_tabs.add_child(_build_politics_tab())
 	_tabs.add_child(_build_subregions_tab())
 	_tabs.set_tab_title(0, "Economy")
-	_tabs.set_tab_title(1, "Politics")
+	_tabs.set_tab_title(1, "Ownership")
 	_tabs.set_tab_title(2, "Subregions")
 
 
@@ -216,18 +216,7 @@ func _pretty_name() -> String:
 			var d: Dictionary = MapData.duchies.get(_region_id, {})
 			return str(d.get("name", _region_id))
 		"county": return _region_id
-		"barony":
-			var dd: Node = get_node_or_null("/root/DesignData")
-			if dd != null:
-				var b: Dictionary = dd.baronies.get(_region_id, {})
-				if "name" in b:
-					return str(b.name)
-			# Fallback: look up name from MapData geometry.
-			for cn in MapData.counties:
-				for bb in MapData.counties[cn].get("baronies", []):
-					if str(bb.get("id", "")) == _region_id:
-						return str(bb.get("name", _region_id))
-			return _region_id
+		"barony": return MapData.barony_name(_region_id)
 	return _region_id
 
 
@@ -290,7 +279,10 @@ func _subregion_rows() -> Array:
 					income = int(b.get("income", 0))
 					garrison = int(b.get("garrison", 0))
 					pop = int(b.get("population", 0))
-					rname = str(b.get("name", rid))
+				# Always pull the readable name from MapData — design overrides
+				# only carry "name" for the handful of marked baronies (London,
+				# York, …); the rest get their LAD13NM via the geometry layer.
+				rname = MapData.barony_name(rid)
 		out.append({
 			"region_type": rt, "region_id": rid, "name": rname,
 			"income": income, "garrison": garrison, "population": pop,
@@ -328,10 +320,7 @@ func _vassal_rows() -> Array:
 		var rname: String = child.region_id
 		match str(child.region_type):
 			"duchy":  rname = str(MapData.duchies.get(child.region_id, {}).get("name", child.region_id))
-			"barony":
-				var dd: Node = get_node_or_null("/root/DesignData")
-				if dd != null:
-					rname = str(dd.baronies.get(child.region_id, {}).get("name", child.region_id))
+			"barony": rname = MapData.barony_name(child.region_id)
 		rows.append({
 			"region_type": child.region_type,
 			"region_id": child.region_id,

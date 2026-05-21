@@ -349,31 +349,42 @@ func _build_diplomacy_tab(ch: Dictionary) -> Control:
 	col.add_theme_constant_override("separation", 10)
 	var subject_cid: int = int(ch.get("character_id", 0))
 	var player_cid: int = GameState.player_character_id()
+	var family_prestige: int = int(ch.get("prestige", 0))
 
+	# Opinion (only meaningful for non-self).
 	if player_cid > 0 and subject_cid > 0 and player_cid != subject_cid:
+		col.add_child(UITheme.section_header("Opinion"))
 		var op_yours: int = GameState.opinion_of(player_cid, subject_cid)
 		var op_theirs: int = GameState.opinion_of(subject_cid, player_cid)
-		col.add_child(UITheme.section_header("Opinion"))
-		var op_row := UITheme.text_label(
+		col.add_child(UITheme.text_label(
 			"Your opinion: %+d         Their opinion of you: %+d" % [op_yours, op_theirs],
-			12, UITheme.COL_INK)
-		col.add_child(op_row)
+			12, UITheme.COL_INK))
 
-		col.add_child(UITheme.section_header("Actions"))
-		var actions: Array = GameState.available_actions(player_cid, subject_cid)
-		if actions.is_empty():
-			col.add_child(UITheme.dim_label("(no actions available — no liege/vassal link)", 11))
+	# Their available actions — what THIS character can do. Always shown, so
+	# the user can see the subject's privileges at a glance.
+	var their_actions: Array = GameState.available_actions(subject_cid, player_cid)
+	col.add_child(UITheme.section_header("Actions available to %s   (prestige %d)" % [
+		str(ch.get("given_name", "this character")), family_prestige]))
+	if their_actions.is_empty():
+		col.add_child(UITheme.dim_label("(no actions available from current rank / office)", 11))
+	else:
+		for a in their_actions:
+			# Display-only when the subject isn't the player; clickable when it
+			# IS the player (i.e. you're viewing yourself).
+			var clickable: bool = (subject_cid == player_cid)
+			col.add_child(_build_action_button(a, family_prestige, clickable, player_cid))
+
+	# Player-on-subject actions — only when viewing someone else.
+	if player_cid > 0 and subject_cid > 0 and player_cid != subject_cid:
+		var your_actions: Array = GameState.available_actions(player_cid, subject_cid)
+		col.add_child(UITheme.section_header("Your actions toward them"))
+		if your_actions.is_empty():
+			col.add_child(UITheme.dim_label("(no actions — no liege/vassal link)", 11))
 		else:
-			for a in actions:
-				var btn := UITheme.styled_button("▸  " + str(a.label))
-				btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-				btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
-				btn.tooltip_text = str(a.description)
-				var key: String = str(a.key)
-				btn.pressed.connect(func(): _on_action_pressed(key, subject_cid))
-				col.add_child(btn)
-	elif player_cid == subject_cid:
-		col.add_child(UITheme.dim_label("This is you. Self-actions land in a later patch.", 11))
+			# Player's own family prestige — pull from the player character row.
+			var player_prestige: int = int(GameState.character(player_cid).get("prestige", 0))
+			for a in your_actions:
+				col.add_child(_build_action_button(a, player_prestige, true, subject_cid))
 
 	# Inbox — pending actions awaiting THIS character's response.
 	var inbox: Array = GameState.pending_actions_for(subject_cid)
@@ -402,6 +413,66 @@ func _build_diplomacy_tab(ch: Dictionary) -> Control:
 			decline.pressed.connect(func(): _resolve_inbox_item(aid, false))
 			item.add_child(decline)
 	return col
+
+
+# Build one action row. Office-gated actions get a gold border + the "privilege
+# of <office>" tooltip suffix. Disabled when the actor can't afford the
+# prestige cost. `pressed_target_cid` is the id passed to submit_action.
+func _build_action_button(action: Dictionary, prestige_budget: int,
+		clickable: bool, pressed_target_cid: int) -> Control:
+	var label: String = "▸  " + str(action.get("label", action.get("key", "")))
+	var cost: int = int(action.get("prestige_cost", 0))
+	if cost > 0:
+		label += "   (%d prestige)" % cost
+	var btn := UITheme.styled_button(label)
+	btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	# Tooltip: description, plus a "privilege of <office>" suffix when gated.
+	var tip: String = str(action.get("description", ""))
+	if "requires_office" in action:
+		var off_key: String = str(action["requires_office"])
+		var off_label: String = str(GameState.OFFICE_LABELS.get(off_key, off_key.capitalize()))
+		tip += "\n\n(privilege of %s)" % off_label
+		# Gold-bordered stylebox flags this as an office-granted action.
+		_apply_office_stylebox(btn)
+	btn.tooltip_text = tip
+	# Affordability gate. Visually fade + disable when the actor can't pay.
+	if cost > prestige_budget:
+		btn.disabled = true
+		btn.modulate = Color(1, 1, 1, 0.55)
+	if not clickable:
+		btn.disabled = true
+		btn.focus_mode = Control.FOCUS_NONE
+	if clickable and not btn.disabled:
+		var key: String = str(action.get("key", ""))
+		btn.pressed.connect(func(): _on_action_pressed(key, pressed_target_cid))
+	return btn
+
+
+# Replace the styled button's normal/hover styleboxes with gold-bordered
+# variants so office-granted actions stand out from the base set.
+func _apply_office_stylebox(btn: Button) -> void:
+	for state in ["normal", "hover", "pressed"]:
+		var sb := StyleBoxFlat.new()
+		match state:
+			"pressed": sb.bg_color = Color(0.22, 0.17, 0.08)
+			"hover":   sb.bg_color = Color(0.18, 0.13, 0.07)
+			_:         sb.bg_color = Color(0.13, 0.10, 0.05)
+		sb.border_color = UITheme.COL_ACCENT_GOLD
+		sb.border_width_left = 2
+		sb.border_width_top = 2
+		sb.border_width_right = 2
+		sb.border_width_bottom = 2
+		sb.corner_radius_top_left = 2
+		sb.corner_radius_top_right = 2
+		sb.corner_radius_bottom_left = 2
+		sb.corner_radius_bottom_right = 2
+		sb.content_margin_left = 10
+		sb.content_margin_right = 10
+		sb.content_margin_top = 4
+		sb.content_margin_bottom = 4
+		btn.add_theme_stylebox_override(state, sb)
+	btn.add_theme_color_override("font_color", UITheme.COL_ACCENT_GOLD)
 
 
 # ── FOOTER ──────────────────────────────────────────────────────────────────

@@ -241,6 +241,31 @@ func aggregate_barony(_county_name: String, barony_id: String) -> Dictionary:
 	return {"income": 0, "garrison": 0, "population": 0}
 
 
+# Look up the geometry-side display name for a barony (LAD13NM). Falls back
+# to the LAD code if the geometry layer doesn't have it. Used by region
+# panels so the sub-region table shows "Westminster" rather than "E09000033".
+#
+# Args:
+#   barony_id (String): LAD13CD code, e.g. "E08000034".
+# Returns:
+#   String: the human-readable barony name, or `barony_id` if unknown.
+func barony_name(barony_id: String) -> String:
+	if barony_id == "":
+		return ""
+	# Prefer the design-layer override name if any (London, York, Bristol...).
+	var dd: Node = get_node_or_null("/root/DesignData")
+	if dd != null:
+		var b: Dictionary = dd.baronies.get(barony_id, {})
+		if "name" in b:
+			return str(b["name"])
+	# Otherwise walk geometry for the LAD13NM.
+	for cn in counties:
+		for bb in counties[cn].get("baronies", []):
+			if str(bb.get("id", "")) == barony_id:
+				return str(bb.get("name", barony_id))
+	return barony_id
+
+
 # Hit-test the duchy polygons. Returns the duchy id whose union polygon
 # contains world_pos, or "" if none.
 func duchy_at(world_pos: Vector2, world_scale: Vector2 = Vector2(1, 1)) -> String:

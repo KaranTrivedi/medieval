@@ -96,34 +96,26 @@ func _rebuild() -> void:
 	var siblings: Array = _filter(rels, "sibling")
 	var children: Array = _filter(rels, "child")
 
-	# ROW 1 — parents.
-	var parents_row := _row(parents.map(func(r): return r.other), "(no recorded parents)")
-	_root.add_child(_row_with_caption("PARENTS", parents_row))
+	# ROW 1 — Family + Siblings as TWO separate framed groups, side by side
+	# (mirrors the Shogun 2 family screen the user referenced). Parents +
+	# spouse sit in the Family box on the left; brothers/sisters in a
+	# smaller Siblings box on the right.
+	var top_groups := HBoxContainer.new()
+	top_groups.add_theme_constant_override("separation", 18)
+	top_groups.alignment = BoxContainer.ALIGNMENT_CENTER
+	_root.add_child(top_groups)
+	top_groups.add_child(_framed_group("FAMILY", parents.map(func(r): return r.other),
+			"(no recorded parents)", false))
+	top_groups.add_child(_framed_group("SIBLINGS", siblings.map(func(r): return r.other),
+			"(none recorded)", true))
 
-	# Connecting line.
+	# Connector down to the central head-of-house row.
 	_root.add_child(_v_arrow())
 
-	# ROW 2 — siblings | focus + spouse(es).
-	var middle_row := HBoxContainer.new()
-	middle_row.add_theme_constant_override("separation", 24)
-	middle_row.alignment = BoxContainer.ALIGNMENT_CENTER
-	# Sibling column (left).
-	var sib_col := VBoxContainer.new()
-	sib_col.add_theme_constant_override("separation", 4)
-	var sib_caption := _caption("SIBLINGS")
-	sib_col.add_child(sib_caption)
-	if siblings.is_empty():
-		var none := _text_label("—", 11)
-		none.add_theme_color_override("font_color", Color(0.45, 0.40, 0.30))
-		sib_col.add_child(none)
-	else:
-		for r in siblings:
-			sib_col.add_child(_chip(r.other, false))
-	middle_row.add_child(sib_col)
-
-	# Focus + spouse column.
+	# ROW 2 — house head + spouse, centred.
 	var couple_col := VBoxContainer.new()
 	couple_col.add_theme_constant_override("separation", 4)
+	couple_col.alignment = BoxContainer.ALIGNMENT_CENTER
 	couple_col.add_child(_caption("HOUSE HEAD"))
 	var couple_row := HBoxContainer.new()
 	couple_row.add_theme_constant_override("separation", 12)
@@ -134,18 +126,52 @@ func _rebuild() -> void:
 		heart.text = "⚭"
 		heart.add_theme_font_size_override("font_size", 18)
 		heart.add_theme_color_override("font_color", Color(0.85, 0.55, 0.40))
+		heart.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 		couple_row.add_child(heart)
 		couple_row.add_child(_chip(spouses[0].other, false))
 	couple_col.add_child(couple_row)
-	middle_row.add_child(couple_col)
-	_root.add_child(middle_row)
+	_root.add_child(couple_col)
 
-	# Connecting line down to children.
+	# Connector to children.
 	_root.add_child(_v_arrow())
 
-	# ROW 3 — children.
-	var kid_row := _row(children.map(func(r): return r.other), "(no recorded children)")
-	_root.add_child(_row_with_caption("CHILDREN", kid_row))
+	# ROW 3 — children, framed.
+	_root.add_child(_framed_group("CHILDREN", children.map(func(r): return r.other),
+			"(no recorded children)", false))
+
+
+# A boxed group of chips with a captioned border (parchment styled). Used for
+# the FAMILY / SIBLINGS / CHILDREN groupings — gives each grouping its own
+# visual frame instead of bleeding rows into one another.
+#
+# Args:
+#   caption (String): heading label, drawn above the box in small caps.
+#   persons (Array): list of other-character dicts to chip.
+#   empty_text (String): shown when persons is empty.
+#   small (bool): when true, chips render at compact (~70%) scale — used for
+#       the SIBLINGS group so the head-of-house row stays the visual anchor.
+# Returns:
+#   PanelContainer (with the caption above as a sibling — wrapped in a VBox).
+func _framed_group(caption: String, persons: Array, empty_text: String, small: bool) -> Control:
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 2)
+	col.alignment = BoxContainer.ALIGNMENT_CENTER
+	col.add_child(_caption(caption))
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", UITheme.chip_stylebox(false))
+	col.add_child(panel)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	panel.add_child(row)
+	if persons.is_empty():
+		var empty := _text_label(empty_text, 11)
+		empty.add_theme_color_override("font_color", Color(0.45, 0.40, 0.30))
+		row.add_child(empty)
+	else:
+		for p in persons:
+			row.add_child(_chip(p, false, small))
+	return col
 
 
 # ── BUILDERS ─────────────────────────────────────────────────────────────────
@@ -176,7 +202,12 @@ func _row(persons: Array, empty_text: String) -> HBoxContainer:
 # A single character "chip" — surname-colored card with given name + age,
 # clickable to refocus the tree on that character. Deceased characters get
 # a darker fill, dimmer text, and a "✝" prefix on the name line.
-func _chip(other: Dictionary, is_focus: bool) -> Button:
+#
+# Args:
+#   other (Dictionary): character row to render.
+#   is_focus (bool): currently-focused character → gold border.
+#   small (bool): compact size for sub-groups like siblings (~70% of normal).
+func _chip(other: Dictionary, is_focus: bool, small: bool = false) -> Button:
 	var btn := Button.new()
 	var alive: bool = bool(other.get("alive", true))
 	var full: String = (str(other.get("given_name", "")) + " " + str(other.get("surname", ""))).strip_edges()
@@ -185,8 +216,12 @@ func _chip(other: Dictionary, is_focus: bool) -> Button:
 		full = "✝  " + full
 		line2 = "deceased · " + line2
 	btn.text = full + "\n" + line2
-	btn.custom_minimum_size = Vector2(170, 60)
-	btn.add_theme_font_size_override("font_size", 12)
+	if small:
+		btn.custom_minimum_size = Vector2(120, 48)
+		btn.add_theme_font_size_override("font_size", 10)
+	else:
+		btn.custom_minimum_size = Vector2(170, 60)
+		btn.add_theme_font_size_override("font_size", 12)
 	var ink: Color = UITheme.COL_INK_DEAD if not alive else (UITheme.COL_ACCENT_GOLD if is_focus else UITheme.COL_INK)
 	btn.add_theme_color_override("font_color", ink)
 	btn.add_theme_color_override("font_hover_color", UITheme.COL_BUTTON_HOVER)

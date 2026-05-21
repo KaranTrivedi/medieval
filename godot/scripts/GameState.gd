@@ -61,10 +61,30 @@ func _ready() -> void:
 	if FileAccess.file_exists(WORKING_DB):
 		_open(WORKING_DB)
 		_create_schema()
+		# Heal-on-resume: a save created before offices existed needs the
+		# initial appointments back-filled. Idempotent — silent no-op when
+		# offices is already populated.
+		_ensure_offices_seeded()
 		print("GameState: resumed working save at ", WORKING_DB,
 				" (turn=", current_turn(), ")")
 	else:
 		new_game("england")
+
+
+# If the offices table is empty but we have country-tier holdings, seed the
+# initial office appointments so resumed saves match fresh-game state.
+func _ensure_offices_seeded() -> void:
+	# Expected full seed: 5 offices × N countries. If we have less, treat as
+	# a partial state (could be a save predating this feature) and re-seed.
+	# INSERT OR REPLACE makes _seed_country_offices safe to re-run.
+	db.query("SELECT COUNT(*) AS c FROM holdings WHERE region_type = 'country';")
+	if db.query_result.is_empty() or int(db.query_result[0]["c"]) == 0:
+		return
+	var country_count: int = int(db.query_result[0]["c"])
+	if _count("offices") >= country_count * COUNTRY_OFFICES.size():
+		return
+	_seed_country_offices()
+	print("GameState: ensured country offices on resumed save (%d rows)" % _count("offices"))
 
 
 # Start a fresh game.
@@ -1007,36 +1027,124 @@ func adjust_opinion(character_id: int, target_id: int, delta: int) -> int:
 # `resolution`:
 #   "immediate" — applies effects right away, no pending row
 #   "reply"     — creates a pending action; target accepts/declines later
+# Each action specifies a `prestige_cost` (deducted from initiator's family
+# prestige on submit; submit is rejected if insufficient) and, optionally,
+# a `requires_office` key — only characters currently holding that office
+# anywhere can invoke the action. The UI tags such actions with a bordered
+# style and a "(privilege of <office>)" tooltip.
 const ACTION_CATALOG: Dictionary = {
+	# ── Base actions (no office needed) ──
 	"request_marriage": {
 		"label": "Request marriage alliance",
-		"direction": "up",
-		"resolution": "reply",
+		"direction": "up", "resolution": "reply",
+		"prestige_cost": 10,
 		"description": "Ask your liege to approve a marriage between your families.",
-		"on_accept_opinion": +15,
-		"on_decline_opinion": -10,
+		"on_accept_opinion": +15, "on_decline_opinion": -10,
 	},
 	"grant_aid": {
 		"label": "Grant aid",
-		"direction": "down",
-		"resolution": "immediate",
+		"direction": "down", "resolution": "immediate",
+		"prestige_cost": 15,
 		"description": "Send treasury support to a vassal in need.",
 		"on_accept_opinion": +20,
 	},
 	"appoint_office": {
 		"label": "Appoint to office",
-		"direction": "down",
-		"resolution": "immediate",
+		"direction": "down", "resolution": "immediate",
+		"prestige_cost": 5,
 		"description": "Place this vassal in one of your court offices.",
 		"on_accept_opinion": +10,
 	},
 	"swear_fealty": {
 		"label": "Swear fealty",
-		"direction": "up",
-		"resolution": "immediate",
+		"direction": "up", "resolution": "immediate",
+		"prestige_cost": 5,
 		"description": "Reaffirm your loyalty to your liege.",
 		"on_accept_opinion": +5,
 	},
+	# ── Office-granted actions ──
+	# Each requires the actor to currently hold the named office at any tier.
+	"raise_levy": {
+		"label": "Raise levy",
+		"direction": "self", "resolution": "immediate",
+		"prestige_cost": 20,
+		"requires_office": "marshal",
+		"description": "Mobilise troops from your demesne for a campaign.",
+	},
+	"declare_war": {
+		"label": "Declare war",
+		"direction": "peer", "resolution": "immediate",
+		"prestige_cost": 50,
+		"requires_office": "marshal",
+		"description": "Formally declare war on a peer realm.",
+		"on_accept_opinion": -50,
+	},
+	"levy_special_tax": {
+		"label": "Levy special tax",
+		"direction": "down", "resolution": "immediate",
+		"prestige_cost": 10,
+		"requires_office": "steward",
+		"description": "Extract additional taxes from a vassal.",
+		"on_accept_opinion": -10,
+	},
+	"sponsor_works": {
+		"label": "Sponsor public works",
+		"direction": "down", "resolution": "immediate",
+		"prestige_cost": 25,
+		"requires_office": "steward",
+		"description": "Bankroll roads, bridges, or marketplaces in a vassal's demesne.",
+		"on_accept_opinion": +15,
+	},
+	"forge_alliance": {
+		"label": "Forge alliance",
+		"direction": "peer", "resolution": "reply",
+		"prestige_cost": 25,
+		"requires_office": "chancellor",
+		"description": "Negotiate a mutual defence pact with another realm.",
+		"on_accept_opinion": +20, "on_decline_opinion": -5,
+	},
+	"sue_for_peace": {
+		"label": "Sue for peace",
+		"direction": "peer", "resolution": "reply",
+		"prestige_cost": 15,
+		"requires_office": "chancellor",
+		"description": "Offer terms to end an ongoing war.",
+		"on_accept_opinion": +10,
+	},
+	"spy_on_court": {
+		"label": "Spy on court",
+		"direction": "peer", "resolution": "immediate",
+		"prestige_cost": 15,
+		"requires_office": "spymaster",
+		"description": "Plant agents in another lord's court to read his correspondence.",
+	},
+	"bless_marriage": {
+		"label": "Bless marriage",
+		"direction": "down", "resolution": "immediate",
+		"prestige_cost": 5,
+		"requires_office": "chaplain",
+		"description": "Bestow ecclesiastical blessing on a vassal's marriage.",
+		"on_accept_opinion": +15,
+	},
+	"excommunicate": {
+		"label": "Excommunicate",
+		"direction": "down", "resolution": "immediate",
+		"prestige_cost": 40,
+		"requires_office": "chaplain",
+		"description": "Remove a vassal from the protection of the Church.",
+		"on_accept_opinion": -50,
+	},
+}
+
+
+# Office key → human-readable label used in tooltips ("privilege of …").
+const OFFICE_LABELS: Dictionary = {
+	"marshal":    "Marshal",
+	"steward":    "Steward",
+	"chancellor": "Chancellor",
+	"spymaster":  "Spymaster",
+	"chaplain":   "Chaplain",
+	"castellan":  "Castellan",
 }
 
 
@@ -1054,14 +1162,33 @@ func available_actions(actor_id: int, target_id: int = 0) -> Array:
 	var out: Array = []
 	if actor_id <= 0:
 		return out
-	var relation: String = _hierarchical_relation(actor_id, target_id)  # "up"|"down"|"peer"|"self"|""
+	var relation: String = _hierarchical_relation(actor_id, target_id)
+	var actor_offices: Dictionary = _office_keys_held_by(actor_id)
 	for key in ACTION_CATALOG.keys():
 		var spec: Dictionary = ACTION_CATALOG[key]
 		if str(spec.direction) != relation:
 			continue
+		# Office gating: filter out actions the actor lacks the privilege for.
+		if "requires_office" in spec:
+			if not actor_offices.has(str(spec.requires_office)):
+				continue
 		var entry: Dictionary = spec.duplicate()
 		entry["key"] = key
 		out.append(entry)
+	return out
+
+
+# Lookup table {office_key: true} for offices this character currently holds.
+# Returned as a Dict for O(1) membership check by available_actions.
+func _office_keys_held_by(character_id: int) -> Dictionary:
+	if character_id <= 0:
+		return {}
+	db.query_with_bindings("""
+		SELECT DISTINCT office_key FROM offices
+		WHERE holder_character_id = ?;""", [character_id])
+	var out: Dictionary = {}
+	for row in db.query_result:
+		out[str(row["office_key"])] = true
 	return out
 
 
@@ -1109,6 +1236,26 @@ func submit_action(action_type: String, actor_id: int, target_id: int = 0,
 	if not ACTION_CATALOG.has(action_type):
 		return {"status": "invalid", "resolution_text": "Unknown action " + action_type}
 	var spec: Dictionary = ACTION_CATALOG[action_type]
+	# Prestige gate. Family prestige is the per-character budget. If the
+	# actor's family lacks enough prestige we reject the action before any
+	# row is written. Cost is deducted immediately on submit, NOT refunded
+	# on decline (the political effort of asking already spent the capital).
+	var cost: int = int(spec.get("prestige_cost", 0))
+	var actor_row: Dictionary = character(actor_id)
+	if actor_row.is_empty():
+		return {"status": "invalid", "resolution_text": "Unknown actor"}
+	var family_id: int = int(actor_row.get("family_id", 0))
+	var family_prestige: int = int(actor_row.get("prestige", 0))
+	if family_prestige < cost:
+		return {
+			"status": "rejected",
+			"resolution_text": "Insufficient prestige: %d/%d required." % [family_prestige, cost],
+		}
+	if cost > 0 and family_id > 0:
+		db.query_with_bindings(
+			"UPDATE families SET prestige = prestige - ? WHERE id = ?;",
+			[cost, family_id]
+		)
 	var payload_str: String = JSON.stringify(payload)
 	# SQLite addon needs an explicit `null` Variant for NULL columns; mixing
 	# int and null in a ternary trips the GDScript type checker, so branch.
@@ -1563,9 +1710,83 @@ func _seed_political() -> void:
 		_set_holding("barony", lad, cid, fid)
 		_seed_close_family(cid, bh.surname, bh.gender, bh.age)
 
-	print("GameState: seeded political layer — %d holdings, %d characters, %d families, %d relationships" % [
-		_count("holdings"), _count("characters"), _count("families"), _count("relationships")
+	# Fill out each country's court offices (Marshal/Steward/Chancellor/
+	# Spymaster/Chaplain) with the monarch's male relatives so office-granted
+	# actions are exercisable from the moment the game starts.
+	_seed_country_offices()
+
+	print("GameState: seeded political layer — %d holdings, %d characters, %d families, %d relationships, %d offices" % [
+		_count("holdings"), _count("characters"), _count("families"),
+		_count("relationships"), _count("offices")
 	])
+
+
+# For each country, appoint the monarch's adult male relatives (sons / brothers)
+# to the five great offices. Whoever's left over after the family is exhausted
+# stays as a vacancy — the player can fill them via the appoint_office action.
+const COUNTRY_OFFICES := ["marshal", "steward", "chancellor", "spymaster", "chaplain"]
+func _seed_country_offices() -> void:
+	for country in ["england", "wales", "scotland"]:
+		var monarch: Dictionary = holder_of("country", country)
+		if monarch.is_empty():
+			continue
+		var monarch_id: int = int(monarch.get("character_id", 0))
+		# Eligible appointees: adult living male children + siblings of the
+		# monarch, ordered by age desc.
+		db.query_with_bindings("""
+			SELECT c.id FROM relationships r
+			JOIN characters c ON c.id = r.related_id
+			WHERE r.character_id = ?
+			  AND r.kind IN ('child', 'sibling')
+			  AND c.alive = 1
+			  AND c.gender = 'male'
+			  AND c.age >= 18
+			ORDER BY c.age DESC;""", [monarch_id])
+		var candidates: Array = []
+		for row in db.query_result:
+			candidates.append(int(row["id"]))
+		# Fill offices in order, generating fresh courtier characters when the
+		# monarch has no eligible relative — historically these would be
+		# nobles drawn from the realm's wider gentry, so we spawn them from
+		# the regional name pool with their own family.
+		var country_letter: String = country.substr(0, 1).to_upper()  # "E"/"W"/"S"
+		for office_key in COUNTRY_OFFICES:
+			var appointee_id: int = 0
+			if not candidates.is_empty():
+				appointee_id = candidates.pop_front()
+			else:
+				appointee_id = _spawn_courtier(country_letter, office_key)
+			if appointee_id <= 0:
+				continue
+			db.query_with_bindings("""
+				INSERT OR REPLACE INTO offices(region_type, region_id, office_key, holder_character_id, granted_turn)
+				VALUES(?,?,?,?,0);""",
+				["country", country, office_key, appointee_id]
+			)
+
+
+# Generate a fresh adult male character from the regional name pool to fill
+# a court office when no eligible relative exists. Returns the new id, or 0
+# if name pools haven't loaded.
+func _spawn_courtier(country_letter: String, office_key: String) -> int:
+	if not DesignData.loaded:
+		return 0
+	var pools: Dictionary = DesignData.name_pools
+	var given_pool: Array = pools.get("male", {}).get(country_letter, [])
+	if given_pool.is_empty():
+		given_pool = pools.get("male", {}).get("E", [])
+	var surname_pool: Array = pools.get("surnames", {}).get(country_letter, [])
+	if surname_pool.is_empty():
+		surname_pool = pools.get("surnames", {}).get("E", [])
+	if given_pool.is_empty() or surname_pool.is_empty():
+		return 0
+	var seed_str: String = "courtier:%s:%s" % [country_letter, office_key]
+	var given_name: String = given_pool[_hash_int(seed_str, 1) % given_pool.size()]
+	var sn: String = surname_pool[_hash_int(seed_str, 2) % surname_pool.size()]
+	var fid: int = _ensure_family(sn, 40)
+	var age: int = 28 + (_hash_int(seed_str, 3) % 20)   # 28..47
+	var title: String = str(OFFICE_LABELS.get(office_key, "Lord"))
+	return _insert_character(given_name, fid, title, age, "male")
 
 
 # Normalise a holder field that might be either a dict ({given, surname,...})
