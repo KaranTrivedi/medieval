@@ -318,13 +318,19 @@ func _on_state_changed() -> void:
 # immediately while the 600+ ms barony work streams in.
 func _build_baronies_deferred() -> void:
 	var t_start: int = Time.get_ticks_usec()
-	MapData.build_baronies(border_layer, label_layer, Vector2(4, 4))
+	# Pass county_layer as the fill_parent so the per-barony fills land
+	# alongside the county fills with a `tier="barony"` meta. The zoom-band
+	# toggle in _update_label_visibility swaps which tier is visible.
+	MapData.build_baronies(border_layer, label_layer, Vector2(4, 4), county_layer)
 	@warning_ignore("integer_division")
 	print("Barony layer streamed in: %d ms" % ((Time.get_ticks_usec() - t_start) / 1000))
 	# Force a border-width refresh so deferred baronies pick up the current zoom.
 	_last_border_zoom = -1.0
 	_update_border_widths()
 	_update_label_visibility()
+	# Repaint the overlay so the newly-streamed barony fills get coloured
+	# immediately, not on the next zoom-band crossing.
+	_apply_overlay()
 
 
 # Rescale every Line2D in BorderLayer so its width measured in SCREEN pixels
@@ -407,6 +413,17 @@ func _update_label_visibility() -> void:
 		match tb:
 			"barony":         child.visible = want_barony
 			"barony_dashed":  child.visible = want_county
+	# CountyLayer hosts BOTH county-tier and barony-tier fills (the latter
+	# added by MapData.build_baronies in _build_baronies_deferred). At the
+	# deep-zoom barony tier we swap which set is visible so each barony
+	# shows its own colour instead of bleeding the county fill underneath.
+	for child in county_layer.get_children():
+		if not (child is Polygon2D):
+			continue
+		var tier_meta: String = str(child.get_meta("tier", "county"))
+		match tier_meta:
+			"county": child.visible = not want_barony
+			"barony": child.visible = want_barony
 
 
 # Called when MapSettings emits `changed`. Force-refresh visibility and
@@ -796,6 +813,12 @@ func _build_tooltip_text(hit: Dictionary) -> String:
 	var lines: Array[String] = []
 	var tier_caption: String = rtype.capitalize()
 	lines.append("%s  ·  %s" % [region_name, tier_caption])
+	# Walk UP the territorial hierarchy so the player can see at a glance
+	# where the hovered region sits in the realm. Skipped for COUNTRY tier
+	# (top of the chain — nothing to show above the country itself).
+	var parent_chain: String = _tooltip_parent_chain(rtype, rid, str(hit.get("county", "")))
+	if parent_chain != "":
+		lines.append("In: " + parent_chain)
 	# Look up the holder of this region. Country IDs are lowercased.
 	var holder_key: String = rid.to_lower() if rtype == "country" else rid
 	var holder: Dictionary = GameState.holder_of(rtype, holder_key)
@@ -828,6 +851,49 @@ func _build_tooltip_text(hit: Dictionary) -> String:
 		if pop > 0:    lines.append("People:  %s" % _fmt_thousands(pop))
 		if garr > 0:   lines.append("Garrison: %s" % _fmt_thousands(garr))
 	return "\n".join(lines)
+
+
+# Walk up the territorial chain from the hovered region. For a barony it
+# returns "<County> · <Duchy> · <Country>"; for a county "<Duchy> · <Country>";
+# for a duchy "<Country>"; for a country "". Used by _build_tooltip_text so
+# the player can see where the region sits without opening a panel.
+#
+# Args:
+#   rtype (String): region tier ("country" / "duchy" / "county" / "barony").
+#   rid (String): region id (faction key / duchy id / county name / LAD code).
+#   barony_parent_county (String): parent county name when rtype == "barony"
+#       (the hit dict carries this; otherwise empty).
+# Returns:
+#   String: " · "-joined chain from immediate parent up to country, or "".
+func _tooltip_parent_chain(rtype: String, rid: String, barony_parent_county: String) -> String:
+	var county_name: String = ""
+	var duchy_id: String = ""
+	var country: String = ""
+	match rtype:
+		"country":
+			return ""
+		"duchy":
+			country = str(MapData.COUNTRY_BY_DUCHY.get(rid, ""))
+			return country
+		"county":
+			duchy_id = str(MapData.counties.get(rid, {}).get("duchy", ""))
+			country = str(MapData.COUNTRY_BY_DUCHY.get(duchy_id, ""))
+			var d_name: String = str(MapData.duchies.get(duchy_id, {}).get("name", duchy_id.capitalize()))
+			return "%s · %s" % [d_name, country] if country != "" else d_name
+		"barony":
+			county_name = barony_parent_county
+			duchy_id = str(MapData.counties.get(county_name, {}).get("duchy", ""))
+			country = str(MapData.COUNTRY_BY_DUCHY.get(duchy_id, ""))
+			var d_name2: String = str(MapData.duchies.get(duchy_id, {}).get("name", duchy_id.capitalize()))
+			var parts: Array[String] = []
+			if county_name != "":
+				parts.append(county_name)
+			if d_name2 != "":
+				parts.append(d_name2)
+			if country != "":
+				parts.append(country)
+			return " · ".join(parts)
+	return ""
 
 
 # Format an integer with comma thousands separators. Local copy so the
@@ -987,11 +1053,61 @@ func _apply_overlay() -> void:
 	for child in county_layer.get_children():
 		if not (child is Polygon2D):
 			continue
-		var cn: String = str(child.get_meta("county_name", ""))
-		if cn == "":
-			continue
-		var col: Color = _color_for_county(cn, band, fert, devastated)
+		var tier_meta: String = str(child.get_meta("tier", "county"))
+		var col: Color
+		if tier_meta == "barony":
+			# Barony-tier fills: per-barony wealth + per-barony fertility
+			# (once that data lands). Other modes inherit the parent county's
+			# colour so political / geographic / fertility look uniform
+			# within a county.
+			col = _color_for_barony(child, band, fert, devastated)
+		else:
+			var cn: String = str(child.get_meta("county_name", ""))
+			if cn == "":
+				continue
+			col = _color_for_county(cn, band, fert, devastated)
 		(child as Polygon2D).color = col
+
+
+# Compute the polygon fill colour for a single BARONY at deep zoom. Wealth
+# uses the per-barony income stashed as a meta at build time; fertility +
+# political + geographic inherit the parent county's value (per-barony
+# fertility lands in a follow-up turn alongside the centroid-derived
+# computation).
+func _color_for_barony(p: Polygon2D, band: int,
+		fert: Dictionary, devastated: Dictionary) -> Color:
+	var cn: String = str(p.get_meta("county_name", ""))
+	var alpha: float = 0.88
+	# Non-wealth / non-fertility modes always inherit the parent county's
+	# colour at barony tier — it's the same visual the player saw a moment
+	# ago at county zoom, just one level deeper.
+	if _overlay_mode == OVERLAY_POLITICAL or _overlay_mode == OVERLAY_GEOGRAPHIC:
+		return _color_for_county(cn, band, fert, devastated)
+	if _overlay_mode == OVERLAY_FERTILITY:
+		if devastated.has(cn):
+			var dv := OVERLAY_DEVASTATED
+			dv.a = alpha
+			return dv
+		var bid: String = str(p.get_meta("barony_id", ""))
+		var f: float = MapData.barony_fertility(bid, cn, fert)
+		var t: float = clampf((f - 0.5) / 1.0, 0.0, 1.0)
+		var col := OVERLAY_FERTILITY_LO.lerp(OVERLAY_FERTILITY_HI, t)
+		col.a = alpha
+		return col
+	if _overlay_mode == OVERLAY_WEALTH:
+		if devastated.has(cn):
+			var dv2 := OVERLAY_DEVASTATED
+			dv2.a = alpha
+			return dv2
+		var income: int = int(p.get_meta("income", 0))
+		var max_w: int = _max_wealth_for_band(3)
+		var tw: float = 0.0
+		if max_w > 0:
+			tw = clampf(float(income) / float(max_w), 0.0, 1.0)
+		var colw := OVERLAY_WEALTH_LO.lerp(OVERLAY_WEALTH_HI, tw)
+		colw.a = alpha
+		return colw
+	return Color(0.2, 0.2, 0.2, alpha)
 
 
 # Compute the polygon fill colour for a single county under the current
@@ -1126,9 +1242,16 @@ func _max_wealth_for_band(band: int) -> int:
 			duchy_totals[d2] = int(duchy_totals.get(d2, 0)) + int(MapData.counties[cn].get("income", 0))
 		for v in duchy_totals.values():
 			max_v = maxi(max_v, int(v))
-	else:
+	elif band == 2:
 		for cn in MapData.counties:
 			max_v = maxi(max_v, int(MapData.counties[cn].get("income", 0)))
+	else:
+		# Barony tier — find the richest single barony so the lerp uses the
+		# real top-end. Lower than county totals (counties sum baronies),
+		# so a per-barony pass is needed to avoid washing every fill out.
+		for cn in MapData.counties:
+			for b in MapData.counties[cn].get("baronies", []):
+				max_v = maxi(max_v, int(b.get("income", 0)))
 	_max_county_income = max_v
 	return max_v
 

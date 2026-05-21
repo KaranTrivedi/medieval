@@ -2,7 +2,7 @@
 
 Captain's log for cross-chat continuity. Read this before doing any work in a fresh session. Update at the end of each session.
 
-**Last touched:** 2026-05-21 (evening) — Map appearance pass: parchment background tiled in screen space, polygons dropped to alpha 0.88 so the grain shows through, hover highlight on the region under the cursor, overlay-mode system (Political / Geographic / Fertility / Wealth) with zoom-aware aggregation (sum for wealth, mean for fertility), and TopBar economy chips (💰 income, 🌾 mean fertility) that double as overlay switchers. Ctrl+Tab cycles, Ctrl+Shift+Tab reverses. Devastation red-wash is wired but the data hook is still a stub pending the economy rework.
+**Last touched:** 2026-05-21 (late evening) — Deep-zoom polish: per-barony fill polygons added (county fills hide at barony zoom band, barony fills show), overlay walker now colours each barony individually for Wealth + Fertility, tooltip carries a parent-context line ("In: County · Duchy · Country"), and per-barony fertility is now derived from centroid latitude with a per-duchy richness modifier in `MapData` (replacing the per-duchy hand-typed table as the source of truth). Earlier this evening: parchment background, hover highlight, four-mode overlay, TopBar chips, Ctrl+Tab cycle.
 
 ---
 
@@ -114,19 +114,21 @@ All four modals unified at **880×640** with Close (`✕`) pinned top-right. The
 | `panels/court_panel.gd` | Header (monarch + Close), Great Offices section with same DataTable picker, Direct Vassals list. |
 
 **Map interaction:**
-- **Hover** any region → polygons get a soft warm `HOVER_TINT` modulate (separate from `SELECTED_TINT` so the player can tell the difference at a glance). After 500 ms of stable hover, a rich tooltip appears with name/tier/holder/age/income/population/garrison.
+- **Hover** any region → polygons get a soft warm `HOVER_TINT` modulate (separate from `SELECTED_TINT` so the player can tell the difference at a glance). After 500 ms of stable hover, a rich tooltip appears with name/tier/holder/age/income/population/garrison, plus an "In: …" line walking the parent chain (barony → county → duchy → country, etc.).
 - **Click** a region → directly opens `RegionPanel`. The old right-side InfoPanel was removed; `ui_panel.gd` is now a slim CanvasLayer stub that keeps the existing .tscn script reference valid.
 
 **Overlay modes** (driven by `_overlay_mode` in CampaignMap.gd, default = `political`):
 
-| Mode | Colour function | Aggregation at country / duchy zoom |
-|---|---|---|
-| `political` | Faction colour (England red, Wales green, Scotland blue) from `DesignData.factions_by_duchy`. | n/a — already faction-uniform. |
-| `geographic` | Duchy colour from `MapData.duchies[did].color`. | n/a — already duchy-uniform. |
-| `fertility` | Lerp `OVERLAY_FERTILITY_LO` (dry yellow) → `OVERLAY_FERTILITY_HI` (lush green) by normalised fertility `(f − 0.5)`. | **Mean** across constituent counties. |
-| `wealth` | Lerp `OVERLAY_WEALTH_LO` (dark gold) → `OVERLAY_WEALTH_HI` (bright gold) by `income / max_in_band`. | **Sum** across constituent counties. |
+| Mode | Colour function | Aggregation at country / duchy zoom | At barony zoom |
+|---|---|---|---|
+| `political` | Faction colour (England red, Wales green, Scotland blue) from `DesignData.factions_by_duchy`. | n/a — already faction-uniform. | Inherits parent county. |
+| `geographic` | Duchy colour from `MapData.duchies[did].color`. | n/a — already duchy-uniform. | Inherits parent county. |
+| `fertility` | Lerp `OVERLAY_FERTILITY_LO` (dry yellow) → `OVERLAY_FERTILITY_HI` (lush green) by normalised fertility `(f − 0.5)`. | **Mean** across constituent counties. | **Per-barony** value from `MapData.barony_fertility`. |
+| `wealth` | Lerp `OVERLAY_WEALTH_LO` (dark gold) → `OVERLAY_WEALTH_HI` (bright gold) by `income / max_in_band`. | **Sum** across constituent counties. | **Per-barony** income from the polygon's `income` meta; normalised against the richest barony. |
 
 Devastated counties (red wash) are overlaid on `fertility` / `wealth`. `_devastated_lookup()` returns an empty set today — flip it on once the economy rework adds the column.
+
+**Barony-tier fills.** `MapData.build_baronies(..., fill_parent=county_layer)` adds a per-barony `Polygon2D` with `tier="barony"` meta. `_update_label_visibility` toggles county vs barony fills at band 3 — they live in the same node, just one tier is visible at a time.
 
 Repaint triggers: mode change, zoom-band crossing (handled inside `_update_label_visibility`), and `GameState.state_changed` (turn end → fertility shifted).
 
@@ -222,6 +224,24 @@ Two key read APIs:
 
 ---
 
+## Fertility model (2026-05-21 late evening)
+
+Per-barony fertility is now the source of truth, derived from each barony's centroid Y position:
+
+```
+t       = (centroid_y - island_y_min) / (island_y_max - island_y_min)   # 0=north, 1=south
+base    = lerp(NORTH_FERTILITY=0.55, SOUTH_FERTILITY=1.30, t)
+final   = base × FERTILITY_DUCHY_MOD[duchy_id]
+```
+
+`FERTILITY_DUCHY_MOD` lives in `MapData.gd` and carries small designer adjustments around 1.0 (Norfolk +10% for fen, Gloucester +8% for Severn Vale, Highlands -15% for harshness, Gwynedd -8% for Snowdonia, etc.). The latitude curve does the heavy lifting; the modifier expresses character.
+
+Per-county fertility (`counties_state.fertility`, what the per-turn harvest uses) is seeded as the **mean** of constituent baronies' fertility via `MapData.county_fertility_avg`. The legacy `DesignData.fertility_by_duchy` dict is kept only as a fallback when MapData data is missing.
+
+To get the new values on an existing save, delete `user://current.db` (or click "New Game") — the migration is a re-seed, not a column add.
+
+---
+
 ## Economy rework (NEXT — explicitly paused this session)
 
 The user has flagged the economy needs a re-design: "treasury etc. doesnt make any sense. Needs to be allocated properly." Retinue / troop counts are also slated to be replaced with lord-specific troop types. Don't extend the current `_advance_personal_economy` or `retinues` model — just leave it ticking until the rework starts.
@@ -259,6 +279,9 @@ Two hooks already in place for that work:
 
 ## Recent design decisions
 
+- **2026-05-21 (late evening)**: Per-barony fill polygons; county fills hide at the deep-zoom band and barony fills show. Wealth overlay normalises against the richest single barony; Fertility overlay uses per-barony values derived from centroid latitude × duchy richness modifier.
+- **2026-05-21 (late evening)**: Tooltip carries an "In: County · Duchy · Country" line walking up the territorial chain from whatever tier is hovered.
+- **2026-05-21 (late evening)**: Fertility model moved from per-duchy hand-typed (`DesignData.fertility_by_duchy`) to per-barony centroid-derived (`MapData._compute_barony_fertility`). County fertility seeds as the mean. Legacy dict survives as a fallback only.
 - **2026-05-21 (evening)**: Hover modulate (`HOVER_TINT`) added per-polygon; widens with zoom band (hovering a country lights up every county in that country, etc.). Distinct from `SELECTED_TINT` and never overrides it.
 - **2026-05-21 (evening)**: Overlay-mode system — Political (default) / Geographic / Fertility / Wealth — with zoom-band aggregation. Country/duchy zoom aggregates the constituent counties (sum for wealth, mean for fertility). Devastation red wash is plumbed but the data hook is a stub until the economy rework.
 - **2026-05-21 (evening)**: Faction economy chips in TopBar (💰 income, 🌾 fertility) double as overlay switchers. Ctrl+Tab cycles modes; chip click sets directly.

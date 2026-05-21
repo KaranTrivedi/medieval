@@ -136,6 +136,122 @@ func _merge_design_overlay() -> void:
 		counties[cn]["income"] = int(totals.get("income", 0)) * INCOME_MULTIPLIER
 		counties[cn]["garrison"] = totals.get("garrison", 0)
 		counties[cn]["population"] = totals.get("population", 0)
+	# Per-barony fertility — derived from each barony's centroid Y position
+	# (latitude) plus a duchy richness modifier. Stored back onto the
+	# barony dict so callers can read it without re-walking polygons.
+	_compute_barony_fertility()
+
+
+# Per-barony latitude-derived fertility. Northern baronies trend dry/cold
+# (toward NORTH_FERTILITY); southern baronies fertile (toward SOUTH_FERTILITY).
+# Each duchy carries a small richness modifier so designer intent (fenland
+# Norfolk, lush Severn Vale, harsh Highlands) layers on top of the curve.
+#
+# Writes `fertility` into each entry of counties[cn].baronies[i]. Idempotent.
+const NORTH_FERTILITY := 0.55
+const SOUTH_FERTILITY := 1.30
+const FERTILITY_DUCHY_MOD := {
+	# Bonus duchies — richer than their latitude alone would suggest.
+	"norfolk":    1.10,   # fen + east anglian breadbasket
+	"gloucester": 1.08,   # severn vale lowland
+	"lothian":    1.02,   # central belt of Scotland
+	# Neutral / mild penalty for terrain harshness beyond latitude.
+	"lancaster":  1.00,
+	"chester":    1.00,
+	"march":      1.00,
+	"cornwall":   1.00,
+	"deheubarth": 0.98,
+	"morgannwg":  1.00,
+	"glamorgan":  0.98,
+	"powys":      0.95,
+	"gwynedd":    0.92,   # Snowdonia is hostile
+	"galloway":   0.95,
+	"strathearn": 0.95,
+	"moray":      0.92,
+	"highlands":  0.85,   # harshest terrain in the realm
+}
+
+
+func _compute_barony_fertility() -> void:
+	# Compute the island's Y range once so every barony normalises against
+	# the same north/south bounds. Godot's Y is positive-down — Cornwall
+	# (south) has the LARGER Y, the Highlands (north) the SMALLER Y.
+	var y_min: float = INF
+	var y_max: float = -INF
+	for cn in counties:
+		for b in counties[cn].get("baronies", []):
+			var c: Array = b.get("center", [])
+			if c.size() < 2:
+				continue
+			var y: float = float(c[1])
+			y_min = minf(y_min, y)
+			y_max = maxf(y_max, y)
+	if y_max <= y_min:
+		return  # data not loaded yet
+	var span: float = y_max - y_min
+	for cn in counties:
+		var did: String = str(counties[cn].get("duchy", ""))
+		var mod: float = float(FERTILITY_DUCHY_MOD.get(did, 1.0))
+		for b in counties[cn].get("baronies", []):
+			var c2: Array = b.get("center", [])
+			if c2.size() < 2:
+				b["fertility"] = mod  # fallback at neutral × richness
+				continue
+			# t = 0 at the northernmost barony (cold), 1 at the south.
+			var t: float = (float(c2[1]) - y_min) / span
+			var base: float = lerpf(NORTH_FERTILITY, SOUTH_FERTILITY, t)
+			b["fertility"] = base * mod
+
+
+# Per-barony fertility lookup. Falls back to the county-level fertility from
+# counties_state (passed in via `county_fert_lookup`) when the barony has no
+# computed value yet, then to the duchy's richness modifier. Used by the
+# CampaignMap overlay at the deep-zoom barony tier.
+#
+# Args:
+#   barony_id (String): LAD code.
+#   county_name (String): parent county (so the fallback can look up duchy mod).
+#   county_fert_lookup (Dictionary): {county_id: fertility} from GameState.
+# Returns:
+#   float: fertility value, typically [0.4, 1.3].
+func barony_fertility(barony_id: String, county_name: String,
+		county_fert_lookup: Dictionary = {}) -> float:
+	var co: Dictionary = counties.get(county_name, {})
+	for b in co.get("baronies", []):
+		if str(b.get("id", "")) == barony_id:
+			if b.has("fertility"):
+				return float(b["fertility"])
+			break
+	# Fallback 1: parent county's noise-walked fertility from the DB.
+	if county_fert_lookup.has(county_name):
+		return float(county_fert_lookup[county_name])
+	# Fallback 2: duchy richness modifier at the neutral midpoint.
+	var did: String = str(co.get("duchy", ""))
+	return float(FERTILITY_DUCHY_MOD.get(did, 1.0))
+
+
+# Average fertility across a county's constituent baronies. Used by
+# GameState._seed_political so counties_state.fertility starts as the
+# per-barony aggregate instead of a hand-typed duchy constant.
+#
+# Args:
+#   county_name (String).
+# Returns:
+#   float: mean fertility, or 1.0 if the county has no baronies / data.
+func county_fertility_avg(county_name: String) -> float:
+	var co: Dictionary = counties.get(county_name, {})
+	var bs: Array = co.get("baronies", [])
+	if bs.is_empty():
+		return 1.0
+	var total: float = 0.0
+	var n: int = 0
+	for b in bs:
+		if b.has("fertility"):
+			total += float(b["fertility"])
+			n += 1
+	if n == 0:
+		return 1.0
+	return total / float(n)
 
 # ── COUNTY ACCESSORS ──────────────────────────────────────────────────────────
 func get_county(county_name: String) -> Dictionary:
@@ -416,6 +532,10 @@ func build_county_polygons(parent: Node2D, world_scale: Vector2 = Vector2(4, 4))
 				# Attach county metadata to EVERY piece so hit-testing works
 				# anywhere in the county, no matter which piece is clicked.
 				p2d.set_meta("county_name", cn)
+				# Tier tag so the zoom-band visibility code can flip county
+				# fills off when the player drops to barony-tier zoom and
+				# the per-barony fills (added by build_baronies) take over.
+				p2d.set_meta("tier", "county")
 				if first_piece_for_county:
 					p2d.set_meta("duchy", co.get("duchy", ""))
 					p2d.set_meta("earl", co.get("earl", ""))
@@ -509,20 +629,71 @@ func build_county_borders(parent: Node2D, world_scale: Vector2 = Vector2(4, 4)) 
 #   label_parent (Node2D): typically LabelLayer.
 #   world_scale (Vector2): same scale as everything else.
 # Returns: void
-func build_baronies(border_parent: Node2D, label_parent: Node2D, world_scale: Vector2 = Vector2(4, 4)) -> void:
+func build_baronies(border_parent: Node2D, label_parent: Node2D, world_scale: Vector2 = Vector2(4, 4),
+		fill_parent: Node2D = null) -> void:
 	const BARONY_BORDER_COLOR := Color(0.10, 0.07, 0.03, 0.95)
 	# Target screen-pixel width — bumped up so the dashes register clearly.
 	const BARONY_BORDER_PX := 1.4
+	# Alpha for the barony FILLS — matches the county-fill alpha set in
+	# build_county_polygons so both tiers blend with the parchment the same
+	# way. Default fill colour is the parent county's duchy colour; the
+	# CampaignMap overlay system rewrites this on top per active mode.
+	const BARONY_FILL_ALPHA := 0.88
+	# Build a duchy → colour lookup once (mirrors build_county_polygons).
+	var duchy_colors: Dictionary = {}
+	for did in duchies:
+		var hex := str(duchies[did].get("color", "#666666"))
+		duchy_colors[did] = Color.html(hex) if hex.begins_with("#") else Color(0.2, 0.2, 0.2)
 
 	var border_count := 0
 	var dashed_count := 0
 	var label_count := 0
+	var fill_count := 0
 	const DashedPoly := preload("res://scripts/DashedPolygon.gd")
 	for cn in counties:
 		var co: Dictionary = counties[cn]
 		var bs: Array = co.get("baronies", [])
 		for b in bs:
 			var b_rings: Array = b.get("polygons", [])
+			# Per-barony FILLS for the deep-zoom tier. Hidden by default; the
+			# CampaignMap zoom-band toggle flips them on at band 3 (and hides
+			# the county-tier fills at the same time). Each piece carries
+			# tier/barony_id/county_name/income metas so the overlay system
+			# can colour them by per-barony wealth without round-tripping
+			# through DesignData.
+			if fill_parent != null and not b_rings.is_empty():
+				var b_id: String = str(b.get("id", ""))
+				var b_income: int = int(b.get("income", 0))
+				var duchy_id: String = str(co.get("duchy", ""))
+				var base_col: Color = duchy_colors.get(duchy_id, Color(0.2, 0.2, 0.2))
+				base_col.a = BARONY_FILL_ALPHA
+				for ring_raw in b_rings:
+					if ring_raw.size() < 3:
+						continue
+					var fring := PackedVector2Array()
+					for pt in ring_raw:
+						fring.append(Vector2(pt[0], pt[1]) * world_scale)
+					if fring.size() < 3:
+						continue
+					# Convex decomposition — same trick build_county_polygons
+					# uses to dodge Godot's auto-triangulator failures.
+					var convex: Array = Geometry2D.decompose_polygon_in_convex(fring)
+					if convex.is_empty():
+						convex = [fring]
+					for piece in convex:
+						if piece.size() < 3:
+							continue
+						var p2d := Polygon2D.new()
+						p2d.polygon = piece
+						p2d.color = base_col
+						p2d.set_meta("tier", "barony")
+						p2d.set_meta("barony_id", b_id)
+						p2d.set_meta("county_name", cn)
+						p2d.set_meta("income", b_income)
+						p2d.set_meta("zoom_band", "barony")
+						p2d.visible = false
+						fill_parent.add_child(p2d)
+						fill_count += 1
 			# Two parallel sets of outlines per barony:
 			#   - DASHED (zoom_band "barony_dashed") shown at COUNTY band as
 			#     subtle subdivision hints inside each county.
@@ -586,7 +757,9 @@ func build_baronies(border_parent: Node2D, label_parent: Node2D, world_scale: Ve
 			label_parent.add_child(b_label)
 			label_count += 1
 
-	print("MapData: Built %d solid + %d dashed barony outlines + %d labels." % [border_count, dashed_count, label_count])
+	print("MapData: Built %d barony fills + %d solid + %d dashed outlines + %d labels." % [
+		fill_count, border_count, dashed_count, label_count
+	])
 
 
 # Maps a duchy id to the political/geographic country its land sits in.

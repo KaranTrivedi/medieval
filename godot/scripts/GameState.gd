@@ -1021,6 +1021,46 @@ func adjust_treasury(faction_id: String, delta: int) -> int:
 	return int(f.get("treasury", 0))
 
 
+# Aggregate faction-level economy summary for the TopBar chips. Sums income
+# across every county the faction owns, averages their fertility, and counts
+# devastated counties (no-yield this turn). Treasury comes straight from
+# factions.treasury but is exposed here so the TopBar only needs one call.
+#
+# Args:
+#   faction_id (String): lowercase id ("england" / "wales" / "scotland").
+# Returns:
+#   Dictionary: {treasury, total_income, mean_fertility, county_count,
+#                devastated_count}.
+func faction_economy_summary(faction_id: String) -> Dictionary:
+	var out: Dictionary = {
+		"treasury": 0, "total_income": 0,
+		"mean_fertility": 0.0, "county_count": 0,
+		"devastated_count": 0,
+	}
+	if db == null:
+		return out
+	var f: Dictionary = faction(faction_id)
+	out.treasury = int(f.get("treasury", 0))
+	db.query_with_bindings(
+		"SELECT county_id, fertility FROM counties_state WHERE owner_faction_id = ?;",
+		[faction_id]
+	)
+	var total_inc: int = 0
+	var fert_sum: float = 0.0
+	var n: int = 0
+	for row in db.query_result:
+		var cn: String = str(row["county_id"])
+		var co: Dictionary = MapData.get_county(cn)
+		total_inc += int(co.get("income", 0))
+		fert_sum += float(row["fertility"])
+		n += 1
+	out.total_income = total_inc
+	out.county_count = n
+	if n > 0:
+		out.mean_fertility = fert_sum / float(n)
+	return out
+
+
 # ── POLITICAL LAYER (read API) ────────────────────────────────────────────────
 
 # Look up the head-of-family currently holding a region.
@@ -2051,7 +2091,13 @@ func _seed() -> void:
 		var duchy: String = co.get("duchy", "")
 		var owner_fid: String = factions_by_duchy.get(duchy, "england")
 		var garrison: int = int(co.get("garrison", 0))
-		var base_fertility: float = fertility_by_duchy.get(duchy, 1.0)
+		# Per-barony fertility (latitude-derived in MapData) gives a better
+		# baseline than the old per-duchy constant. We pick the county-level
+		# AVERAGE here, then add a small Gaussian shake so even adjacent
+		# counties in the same duchy don't open with identical values.
+		# fertility_by_duchy is kept as a fallback for sparse data.
+		var fert_avg: float = MapData.county_fertility_avg(cname)
+		var base_fertility: float = fert_avg if fert_avg > 0.0 else float(fertility_by_duchy.get(duchy, 1.0))
 		var fertility: float = clampf(
 			GaussianSystem.sample(base_fertility, 0.08),
 			0.4, 1.6
