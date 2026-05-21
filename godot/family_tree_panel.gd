@@ -18,7 +18,7 @@ var _focus_id: int = 0
 
 
 func _ready() -> void:
-	custom_minimum_size = Vector2(900, 540)
+	custom_minimum_size = Vector2(880, 640)
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	UITheme.style_panel(self)
 

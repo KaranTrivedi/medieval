@@ -9,6 +9,9 @@ extends Node2D
 @onready var tooltip: Panel = $UI/Control/Tooltip
 @onready var tooltip_label: Label = $UI/Control/Tooltip/Label
 
+# NavRouter is wired in _ready(); cached so mouse4/mouse5 can dispatch.
+var _nav: Node = null
+
 const WORLD_SCALE := Vector2(4, 4)
 
 # Zoom thresholds for the label LOD system come from the MapSettings
@@ -84,10 +87,14 @@ func _ready():
 	# Region "View details" button in InfoPanel → open RegionPanel.
 	if ui.has_signal("region_details_requested"):
 		ui.region_details_requested.connect(_on_region_details_requested)
-	# Character panel navigation buttons.
+	# Hook every panel's navigation signals into NavRouter so back / forward
+	# (mouse4 / mouse5) walks the visit history. The NavRouter node owns the
+	# stack; panels just emit their navigate intents.
+	_nav = ui.get_node_or_null("Control/NavRouter")
 	var char_panel: Node = ui.get_node_or_null("Control/CharacterPanel")
 	var tree_panel: Node = ui.get_node_or_null("Control/FamilyTreePanel")
 	var region_panel: Node = ui.get_node_or_null("Control/RegionPanel")
+	var court_panel: Node = ui.get_node_or_null("Control/CourtPanel")
 	if char_panel != null:
 		char_panel.navigate_to.connect(_on_character_navigate)
 		char_panel.open_family_tree.connect(_on_open_family_tree)
@@ -95,6 +102,14 @@ func _ready():
 		tree_panel.navigate_to.connect(_on_family_tree_navigate)
 	if region_panel != null:
 		region_panel.open_holder_character.connect(_on_holder_clicked)
+		region_panel.navigate_region.connect(_on_region_details_requested)
+	if court_panel != null:
+		court_panel.open_character_request.connect(_on_holder_clicked)
+		court_panel.open_region_request.connect(_on_region_details_requested)
+	# TopBar "Court" button → open court for the player's faction.
+	var top_bar: Node = ui.get_node_or_null("Control/TopBar")
+	if top_bar != null and top_bar.has_signal("open_court_requested"):
+		top_bar.open_court_requested.connect(_on_open_court_requested)
 	if MapData.is_loaded:
 		build_map()
 	else:
@@ -128,43 +143,43 @@ func _maybe_run_headless_sim() -> void:
 	print("--- SIM: done. turn=%d ---" % GameState.current_turn())
 
 
-# When the user clicks the holder name in the InfoPanel, open the character
-# overview centred on the screen.
+# All four navigation entry points route through NavRouter so the visit
+# history is captured for mouse4 / mouse5 back / forward.
+
 func _on_holder_clicked(character_id: int) -> void:
-	var p: Node = ui.get_node_or_null("Control/CharacterPanel")
-	if p != null and p.has_method("show_for"):
-		p.show_for(character_id)
+	if _nav != null:
+		_nav.open_character(character_id)
 
 
-# Clicking a relation row in the character panel rebuilds the same panel
-# focused on the new character (so you can walk the family without juggling
-# windows).
+# Clicking a relation row in the character panel walks to that character —
+# same entry point as the InfoPanel holder click.
 func _on_character_navigate(character_id: int) -> void:
-	_on_holder_clicked(character_id)
+	if _nav != null:
+		_nav.open_character(character_id)
 
 
-# Family-tree button in the character panel.
 func _on_open_family_tree(character_id: int) -> void:
-	var p: Node = ui.get_node_or_null("Control/FamilyTreePanel")
-	if p != null and p.has_method("show_for"):
-		p.show_for(character_id)
+	if _nav != null:
+		_nav.open_family_tree(character_id)
 
 
-# Clicking any chip in the family tree opens (or refocuses) the character
-# overview for that person. The tree itself also refocuses on the clicked
-# chip via its own internal handler, so both panels stay in sync.
+# Family-tree chip clicked → route to character panel (router also opens it).
 func _on_family_tree_navigate(character_id: int) -> void:
-	var p: Node = ui.get_node_or_null("Control/CharacterPanel")
-	if p != null and p.has_method("show_for"):
-		p.show_for(character_id)
+	if _nav != null:
+		_nav.open_character(character_id)
 
 
-# "View region details" button in the InfoPanel opens the RegionPanel
-# (Economy / Politics / Subregions tabs) for the currently-selected region.
+# "View region details" button in the InfoPanel → RegionPanel.
 func _on_region_details_requested(region_type: String, region_id: String) -> void:
-	var p: Node = ui.get_node_or_null("Control/RegionPanel")
-	if p != null and p.has_method("show_for"):
-		p.show_for(region_type, region_id)
+	if _nav != null:
+		_nav.open_region(region_type, region_id)
+
+
+# Top-bar "Court" button calls this — opens the Court Panel for the player's
+# faction's country.
+func _on_open_court_requested() -> void:
+	if _nav != null:
+		_nav.open_court(GameState.player_faction_id)
 
 func build_map():
 	print("=== build_map() START ===")
@@ -396,6 +411,14 @@ func _unhandled_input(event: InputEvent) -> void:
 			MOUSE_BUTTON_WHEEL_DOWN:
 				if mb.pressed:
 					_zoom_at_cursor(1.0 / ZOOM_STEP)
+			MOUSE_BUTTON_XBUTTON1:
+				# Side-button "back" (mouse4) — browser-style nav history.
+				if mb.pressed and _nav != null:
+					_nav.back()
+			MOUSE_BUTTON_XBUTTON2:
+				# Side-button "forward" (mouse5).
+				if mb.pressed and _nav != null:
+					_nav.forward()
 	elif event is InputEventMouseMotion:
 		var mm := event as InputEventMouseMotion
 		# Left-mouse-drag pan: promote a held left-button to "dragging" once

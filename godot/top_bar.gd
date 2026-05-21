@@ -11,6 +11,10 @@ extends Panel
 @onready var end_turn_button: Button   = $HBox/EndTurnButton
 @onready var settings_button: Button   = $HBox/SettingsButton
 
+# Emitted when the "Court" button is pressed. CampaignMap routes this into
+# NavRouter so the open also pushes onto the back/forward history.
+signal open_court_requested
+
 # Index 0..3 ↔ season number stored in the turns table. Order matches the
 # (prev % 4) math in GameState.advance_turn.
 const SEASON_NAMES: Array = ["Spring", "Summer", "Autumn", "Winter"]
@@ -23,6 +27,12 @@ const SEASON_NAMES: Array = ["Spring", "Summer", "Autumn", "Winter"]
 func _ready() -> void:
 	end_turn_button.pressed.connect(_on_end_turn_pressed)
 	settings_button.pressed.connect(_on_settings_pressed)
+	# Court button: scene-authored sibling of EndTurnButton. Wired here so
+	# the .tscn stays declarative; press emits a signal the CampaignMap
+	# routes into NavRouter so the open is captured in the history.
+	var court_btn: Button = $HBox.get_node_or_null("CourtButton")
+	if court_btn != null:
+		court_btn.pressed.connect(func(): open_court_requested.emit())
 	GameState.state_changed.connect(refresh)
 	refresh()
 

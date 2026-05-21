@@ -22,7 +22,7 @@ var _tabs: TabContainer
 
 
 func _ready() -> void:
-	custom_minimum_size = Vector2(720, 540)
+	custom_minimum_size = Vector2(880, 640)
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	UITheme.style_panel(self)
 
@@ -78,10 +78,12 @@ func _rebuild() -> void:
 
 	_tabs.add_child(_build_economy_tab())
 	_tabs.add_child(_build_politics_tab())
+	_tabs.add_child(_build_offices_tab())
 	_tabs.add_child(_build_subregions_tab())
 	_tabs.set_tab_title(0, "Economy")
 	_tabs.set_tab_title(1, "Ownership")
-	_tabs.set_tab_title(2, "Subregions")
+	_tabs.set_tab_title(2, "Offices")
+	_tabs.set_tab_title(3, "Subregions")
 
 
 func _build_header() -> Control:
@@ -179,6 +181,64 @@ func _build_politics_tab() -> Control:
 		t.row_clicked.connect(_on_vassal_row_clicked)
 		col.add_child(t)
 	return col
+
+
+# Offices tab — lists every office slot for this region's tier with its
+# current holder, or "Vacant" if unappointed. Office keys come from
+# GameState.OFFICES_BY_TIER; labels from OFFICE_LABELS. Each filled slot's
+# name is a button that opens the holder's character panel.
+func _build_offices_tab() -> Control:
+	var col := VBoxContainer.new()
+	col.name = "Offices"
+	col.add_theme_constant_override("separation", 8)
+	var slots: Array = GameState.OFFICES_BY_TIER.get(_region_type, [])
+	if slots.is_empty():
+		col.add_child(UITheme.dim_label("This tier has no recorded offices.", 12))
+		return col
+	col.add_child(UITheme.section_header(
+		"%s court — %d office slot%s" % [
+			_region_type.capitalize(), slots.size(),
+			"" if slots.size() == 1 else "s",
+		]))
+	for office_key in slots:
+		col.add_child(_office_row(str(office_key)))
+	return col
+
+
+# Single row in the Offices tab: label (left), holder (clickable button)
+# or "— Vacant —". Office-key label is gold so it visually stands out.
+func _office_row(office_key: String) -> Control:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 12)
+	var label_text: String = str(GameState.OFFICE_LABELS.get(office_key, office_key.capitalize()))
+	var name_lbl := UITheme.text_label(label_text, 13, UITheme.COL_ACCENT_GOLD_DIM)
+	name_lbl.custom_minimum_size.x = 160
+	row.add_child(name_lbl)
+	var holder: Dictionary = GameState.office_holder(_region_type, _region_id, office_key)
+	if holder.is_empty():
+		var vacant := UITheme.dim_label("— Vacant —", 12)
+		vacant.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		row.add_child(vacant)
+	else:
+		var alive: bool = bool(holder.get("alive", true))
+		var person_btn := Button.new()
+		person_btn.flat = true
+		var dagger: String = "  ✝" if not alive else ""
+		person_btn.text = "%s %s%s" % [
+			str(holder.get("given_name", "")), str(holder.get("surname", "")), dagger,
+		]
+		person_btn.add_theme_font_size_override("font_size", 13)
+		person_btn.add_theme_color_override("font_color",
+				UITheme.COL_INK_DEAD if not alive else UITheme.COL_INK)
+		person_btn.add_theme_color_override("font_hover_color", UITheme.COL_BUTTON_HOVER)
+		person_btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		person_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var cid: int = int(holder.get("character_id", 0))
+		person_btn.pressed.connect(func(): open_holder_character.emit(cid))
+		row.add_child(person_btn)
+		var age := UITheme.dim_label("· %d" % int(holder.get("age", 0)), 11)
+		row.add_child(age)
+	return row
 
 
 func _build_subregions_tab() -> Control:

@@ -1139,13 +1139,48 @@ const ACTION_CATALOG: Dictionary = {
 
 # Office key → human-readable label used in tooltips ("privilege of …").
 const OFFICE_LABELS: Dictionary = {
-	"marshal":    "Marshal",
-	"steward":    "Steward",
-	"chancellor": "Chancellor",
-	"spymaster":  "Spymaster",
-	"chaplain":   "Chaplain",
-	"castellan":  "Castellan",
+	"marshal":     "Marshal",
+	"steward":     "Steward",
+	"chancellor":  "Chancellor",
+	"spymaster":   "Spymaster",
+	"chaplain":    "Chaplain",
+	"chamberlain": "Chamberlain",
+	"bailiff":     "Bailiff",
+	"sheriff":     "Sheriff",
+	"castellan":   "Castellan",
+	"reeve":       "Reeve",
 }
+
+
+# Each tier has its own roster of offices. Country has the five great offices
+# of the realm; lower tiers have progressively smaller courts. Each region of
+# tier X exposes these office slots, and the region's holder appoints among
+# their relatives or sub-region holders.
+const OFFICES_BY_TIER: Dictionary = {
+	"country": ["marshal", "steward", "chancellor", "spymaster", "chaplain"],
+	"duchy":   ["marshal", "steward", "chamberlain", "bailiff"],
+	"county":  ["sheriff", "bailiff", "castellan"],
+	"barony":  ["castellan", "reeve"],
+}
+
+
+# Look up the holder of a specific office slot at a region. Returns a holder
+# row (character_id + given_name + surname + age + alive + ...) or {} when
+# the slot is vacant.
+func office_holder(region_type: String, region_id: String, office_key: String) -> Dictionary:
+	db.query_with_bindings("""
+		SELECT c.id AS character_id, c.given_name, c.title, c.age, c.gender, c.alive,
+		       f.id AS family_id, f.surname, f.prestige
+		FROM offices o
+		JOIN characters c ON c.id = o.holder_character_id
+		LEFT JOIN families f ON f.id = c.family_id
+		WHERE o.region_type = ? AND o.region_id = ? AND o.office_key = ?
+		LIMIT 1;""",
+		[region_type, region_id, office_key]
+	)
+	if db.query_result.is_empty():
+		return {}
+	return db.query_result[0].duplicate()
 
 
 # Which actions can `actor` take against `target`? Filters ACTION_CATALOG by
