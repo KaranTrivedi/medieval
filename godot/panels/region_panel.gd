@@ -9,7 +9,7 @@ extends Panel
 
 # UITheme is a global class via `class_name UITheme`. DataTable is loaded via
 # preload because it's a scripted Control without a global class name.
-const DataTable := preload("res://data_table.gd")
+const DataTable := preload("res://ui/data_table.gd")
 
 signal closed
 signal open_holder_character(character_id: int)
@@ -271,43 +271,98 @@ func _toggle_office_picker(office_key: String) -> void:
 
 
 func _build_office_picker(office_key: String) -> Control:
-	var box := PanelContainer.new()
-	box.add_theme_stylebox_override("panel", UITheme.chip_stylebox(false))
-	var col := VBoxContainer.new()
-	col.add_theme_constant_override("separation", 4)
-	box.add_child(col)
-	col.add_child(UITheme.dim_label(
-		"Select a candidate for %s:" % str(GameState.OFFICE_LABELS.get(office_key, office_key.capitalize())),
-		11))
-	var candidates: Array = GameState.eligible_office_candidates(_region_type, _region_id)
-	if candidates.is_empty():
-		col.add_child(UITheme.dim_label("(no eligible candidates — try the lord's family or sub-region holders)", 11))
-	for cand in candidates:
-		var pick_btn := Button.new()
-		pick_btn.flat = true
-		pick_btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
-		pick_btn.text = "  %s %s   · %d   · %s" % [
-			str(cand.get("given_name", "")),
-			str(cand.get("surname", "")),
-			int(cand.get("age", 0)),
-			str(cand.get("relation_hint", "")),
-		]
-		pick_btn.add_theme_font_size_override("font_size", 12)
-		pick_btn.add_theme_color_override("font_color", UITheme.COL_INK)
-		pick_btn.add_theme_color_override("font_hover_color", UITheme.COL_BUTTON_HOVER)
-		var cid: int = int(cand.get("character_id", 0))
-		pick_btn.pressed.connect(func(): _appoint_office(office_key, cid))
-		col.add_child(pick_btn)
-	var cancel := UITheme.styled_button("Cancel")
-	cancel.pressed.connect(func(): _toggle_office_picker(office_key))
-	col.add_child(cancel)
-	return box
+	return _build_candidate_table(_region_type, _region_id, office_key,
+		func(cid): _appoint_office(office_key, cid),
+		func(): _toggle_office_picker(office_key))
 
 
 func _appoint_office(office_key: String, character_id: int) -> void:
 	GameState.appoint_to_office(_region_type, _region_id, office_key, character_id)
 	_picking_office = ""
 	_rebuild()
+
+
+# Shared comparison-table picker used by the Region panel's Offices tab.
+# Renders eligible candidates as a sortable DataTable (Name / Age / House /
+# Tier / Prestige / Stats / Opinion / Current Office) so the player can
+# compare them side-by-side before clicking a row to appoint.
+#
+# Args:
+#   rtype, rid (String): the region whose office is being filled.
+#   okey (String): office_key being filled.
+#   on_pick (Callable): invoked with (character_id) when a row is clicked.
+#   on_cancel (Callable): invoked when the Cancel button is pressed.
+# Returns:
+#   Control: PanelContainer that hosts the table.
+func _build_candidate_table(rtype: String, rid: String, okey: String,
+		on_pick: Callable, on_cancel: Callable) -> Control:
+	var box := PanelContainer.new()
+	box.add_theme_stylebox_override("panel", UITheme.chip_stylebox(false))
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 6)
+	box.add_child(col)
+	var key_stat: String = OFFICE_KEY_STAT.get(okey, "")
+	var head_txt: String = "Select a candidate for %s" % str(GameState.OFFICE_LABELS.get(okey, okey.capitalize()))
+	if key_stat != "":
+		head_txt += "  (key stat: %s)" % key_stat.capitalize()
+	col.add_child(UITheme.dim_label(head_txt + ":", 11))
+	var candidates: Array = GameState.eligible_office_candidates(rtype, rid)
+	if candidates.is_empty():
+		col.add_child(UITheme.dim_label(
+			"(no eligible candidates — promote within the lord's family or vassal pool)", 11))
+	else:
+		var dt = preload("res://ui/data_table.gd").new()
+		dt.set_columns([
+			{"key": "name",              "label": "Name",     "width": 150},
+			{"key": "age",               "label": "Age",      "align": "right", "format": "int", "width": 40},
+			{"key": "house",             "label": "House",    "width": 90},
+			{"key": "family_tier_label", "label": "Tier",     "width": 60},
+			{"key": "prestige",          "label": "Prestige", "align": "right", "format": "int", "width": 60},
+			{"key": "stats_brief",       "label": "Stats",    "width": 130},
+			{"key": "opinion_of_liege",  "label": "OpL",      "align": "right", "format": "int", "width": 45},
+			{"key": "current_office",    "label": "Office",   "width": 140},
+		])
+		dt.set_rows(_candidate_rows(candidates))
+		dt.row_clicked.connect(func(row): on_pick.call(int(row.get("character_id", 0))))
+		col.add_child(dt)
+	var cancel := UITheme.styled_button("Cancel")
+	cancel.pressed.connect(func(): on_cancel.call())
+	col.add_child(cancel)
+	return box
+
+
+# Project the raw candidate dicts into row-format the DataTable expects.
+# Centralised so Region + Court pickers stay visually identical.
+func _candidate_rows(candidates: Array) -> Array:
+	var rows: Array = []
+	for c in candidates:
+		var full_name: String = (str(c.get("given_name", "")) + " " + str(c.get("surname", ""))).strip_edges()
+		rows.append({
+			"character_id":      int(c.get("character_id", 0)),
+			"name":              full_name,
+			"age":               int(c.get("age", 0)),
+			"house":             str(c.get("surname", "")),
+			"family_tier_label": str(c.get("family_tier_label", "")),
+			"prestige":          int(c.get("prestige", 0)),
+			"stats_brief":       GameState.candidate_stats_brief(c),
+			"opinion_of_liege":  int(c.get("opinion_of_liege", 0)),
+			"current_office":    str(c.get("current_office", "")),
+		})
+	return rows
+
+
+# Which character stat is most relevant for each office slot. Surfaced as a
+# "(key stat: Martial)" hint above the candidate table so the player can
+# focus on the right column when comparing. Coverage matches OFFICES_BY_TIER.
+const OFFICE_KEY_STAT: Dictionary = {
+	"marshal": "martial", "constable": "martial", "castellan": "martial",
+	"chancellor": "diplomacy", "seneschal": "diplomacy", "herald": "diplomacy",
+	"treasurer": "stewardship", "justiciar": "stewardship", "bailiff": "stewardship",
+	"reeve": "stewardship", "forester": "stewardship",
+	"spymaster": "intrigue", "coroner": "intrigue",
+	"chaplain": "piety",
+	"sheriff": "diplomacy",
+}
 
 
 func _vacate_office(office_key: String) -> void:

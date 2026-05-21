@@ -195,34 +195,64 @@ func _build_picker(region_type: String, region_id: String, office_key: String) -
 	var box := PanelContainer.new()
 	box.add_theme_stylebox_override("panel", UITheme.chip_stylebox(false))
 	var col := VBoxContainer.new()
-	col.add_theme_constant_override("separation", 4)
+	col.add_theme_constant_override("separation", 6)
 	box.add_child(col)
-	col.add_child(UITheme.dim_label(
-		"Select a candidate for %s:" % str(GameState.OFFICE_LABELS.get(office_key, office_key.capitalize())),
-		11))
+	var key_stat: String = OFFICE_KEY_STAT.get(office_key, "")
+	var head_txt: String = "Select a candidate for %s" % str(GameState.OFFICE_LABELS.get(office_key, office_key.capitalize()))
+	if key_stat != "":
+		head_txt += "  (key stat: %s)" % key_stat.capitalize()
+	col.add_child(UITheme.dim_label(head_txt + ":", 11))
 	var candidates: Array = GameState.eligible_office_candidates(region_type, region_id)
 	if candidates.is_empty():
 		col.add_child(UITheme.dim_label("(no eligible candidates)", 11))
-	for cand in candidates:
-		var pick_btn := Button.new()
-		pick_btn.flat = true
-		pick_btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
-		pick_btn.text = "  %s %s   · %d   · %s" % [
-			str(cand.get("given_name", "")),
-			str(cand.get("surname", "")),
-			int(cand.get("age", 0)),
-			str(cand.get("relation_hint", "")),
-		]
-		pick_btn.add_theme_font_size_override("font_size", 12)
-		pick_btn.add_theme_color_override("font_color", UITheme.COL_INK)
-		pick_btn.add_theme_color_override("font_hover_color", UITheme.COL_BUTTON_HOVER)
-		var cid: int = int(cand.get("character_id", 0))
-		pick_btn.pressed.connect(func(): _appoint(region_type, region_id, office_key, cid))
-		col.add_child(pick_btn)
+	else:
+		var dt = preload("res://ui/data_table.gd").new()
+		dt.set_columns([
+			{"key": "name",              "label": "Name",     "width": 150},
+			{"key": "age",               "label": "Age",      "align": "right", "format": "int", "width": 40},
+			{"key": "house",             "label": "House",    "width": 90},
+			{"key": "family_tier_label", "label": "Tier",     "width": 60},
+			{"key": "prestige",          "label": "Prestige", "align": "right", "format": "int", "width": 60},
+			{"key": "stats_brief",       "label": "Stats",    "width": 130},
+			{"key": "opinion_of_liege",  "label": "OpL",      "align": "right", "format": "int", "width": 45},
+			{"key": "current_office",    "label": "Office",   "width": 140},
+		])
+		var rows: Array = []
+		for c in candidates:
+			var full_name: String = (str(c.get("given_name", "")) + " " + str(c.get("surname", ""))).strip_edges()
+			rows.append({
+				"character_id":      int(c.get("character_id", 0)),
+				"name":              full_name,
+				"age":               int(c.get("age", 0)),
+				"house":             str(c.get("surname", "")),
+				"family_tier_label": str(c.get("family_tier_label", "")),
+				"prestige":          int(c.get("prestige", 0)),
+				"stats_brief":       GameState.candidate_stats_brief(c),
+				"opinion_of_liege":  int(c.get("opinion_of_liege", 0)),
+				"current_office":    str(c.get("current_office", "")),
+			})
+		dt.set_rows(rows)
+		dt.row_clicked.connect(func(row):
+			_appoint(region_type, region_id, office_key, int(row.get("character_id", 0))))
+		col.add_child(dt)
 	var cancel := UITheme.styled_button("Cancel")
 	cancel.pressed.connect(func(): _toggle_picker(region_type, region_id, office_key))
 	col.add_child(cancel)
 	return box
+
+
+# Office → primary stat lookup mirrored from region_panel.gd. Surfaced
+# above the candidate table so the player knows which Stats column matters
+# for this slot. Keep the two copies aligned if you add new offices.
+const OFFICE_KEY_STAT: Dictionary = {
+	"marshal": "martial", "constable": "martial", "castellan": "martial",
+	"chancellor": "diplomacy", "seneschal": "diplomacy", "herald": "diplomacy",
+	"treasurer": "stewardship", "justiciar": "stewardship", "bailiff": "stewardship",
+	"reeve": "stewardship", "forester": "stewardship",
+	"spymaster": "intrigue", "coroner": "intrigue",
+	"chaplain": "piety",
+	"sheriff": "diplomacy",
+}
 
 
 func _appoint(region_type: String, region_id: String, office_key: String, character_id: int) -> void:

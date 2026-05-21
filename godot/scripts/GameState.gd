@@ -64,7 +64,9 @@ func _ready() -> void:
 		# Heal-on-resume passes — both are idempotent so they're safe to
 		# run every load.
 		_ensure_offices_seeded()
+		_ensure_economy_schema()
 		_ensure_ambitions_seeded()
+		_ensure_retinues_seeded()
 		print("GameState: resumed working save at ", WORKING_DB,
 				" (turn=", current_turn(), ")")
 	else:
@@ -121,6 +123,190 @@ func _ensure_offices_seeded() -> void:
 		print("GameState: cleared %d legacy office rows (one-time sweep)" % before)
 
 
+# Migration step 2: bring up the per-character economy (personal_treasury
+# column + retinues table). user_version sentinel is bumped 1 → 2 once the
+# column has been ALTERed onto pre-existing saves. Fresh DBs already get
+# both via _create_schema, so they just bump the sentinel without ALTERing.
+func _ensure_economy_schema() -> void:
+	db.query("PRAGMA user_version;")
+	var sentinel: int = 0
+	if not db.query_result.is_empty():
+		sentinel = int(db.query_result[0].values()[0])
+	if sentinel >= 2:
+		return
+	# Detect whether the column is already present (fresh DBs) before ALTER.
+	# ALTER TABLE ... ADD COLUMN errors if the column already exists, which
+	# would otherwise abort the rest of the migration on a clean install.
+	db.query("PRAGMA table_info(characters);")
+	var has_col: bool = false
+	for r in db.query_result:
+		if str(r.get("name", "")) == "personal_treasury":
+			has_col = true
+			break
+	if not has_col:
+		db.query("ALTER TABLE characters ADD COLUMN personal_treasury INTEGER NOT NULL DEFAULT 0;")
+		print("GameState: added characters.personal_treasury column (migration v1→v2)")
+	db.query("PRAGMA user_version = 2;")
+
+
+# Make sure every living character has a retinue row. Idempotent via the
+# PRIMARY KEY on retinues.character_id. Default counts are scaled by the
+# character's highest-held tier so a monarch starts with a real host while
+# a landless cousin starts with nothing to maintain.
+func _ensure_retinues_seeded() -> void:
+	db.query("""
+		SELECT id, family_id FROM characters
+		WHERE alive = 1 AND id NOT IN (SELECT character_id FROM retinues);""")
+	if db.query_result.is_empty():
+		return
+	var to_seed: Array = []
+	for r in db.query_result:
+		to_seed.append({"id": int(r["id"])})
+	for c in to_seed:
+		var cid: int = int(c.id)
+		var counts: Dictionary = _default_retinue_for(cid)
+		db.query_with_bindings("""
+			INSERT OR IGNORE INTO retinues(character_id, foot, archers, cavalry, levy)
+			VALUES(?,?,?,?,?);""",
+			[cid, int(counts.foot), int(counts.archers),
+			 int(counts.cavalry), int(counts.levy)]
+		)
+	print("GameState: seeded retinues for %d characters" % to_seed.size())
+
+
+# Compute a starting retinue for a character based on the highest tier they
+# personally hold. Landless characters get nothing — they're courtiers, not
+# warlords. Tier counts are deliberately modest so upkeep stays affordable
+# against the freshly bumped baseline incomes.
+func _default_retinue_for(character_id: int) -> Dictionary:
+	var rank: int = NO_HOLDING_TIER
+	for h in holdings_of(character_id):
+		var r: int = int(TIER_RANK.get(str(h.region_type), NO_HOLDING_TIER))
+		if r < rank:
+			rank = r
+	match rank:
+		0: return {"foot": 200, "archers": 50, "cavalry": 25, "levy": 10}
+		1: return {"foot": 60,  "archers": 20, "cavalry": 8,  "levy": 5}
+		2: return {"foot": 25,  "archers": 8,  "cavalry": 3,  "levy": 3}
+		3: return {"foot": 8,   "archers": 3,  "cavalry": 1,  "levy": 2}
+	return {"foot": 0, "archers": 0, "cavalry": 0, "levy": 0}
+
+
+# Per-unit gold cost paid every turn out of personal_treasury.
+const UPKEEP_PER_UNIT := {
+	"foot": 1,
+	"archers": 2,
+	"cavalry": 4,
+	"levy": 1,
+}
+
+
+# Read a character's retinue row + computed upkeep. Returns a uniform dict
+# even when no row exists yet, so callers don't have to special-case the
+# zero state.
+#
+# Args:
+#   character_id (int).
+# Returns:
+#   {foot, archers, cavalry, levy, total, upkeep}
+func retinue_of(character_id: int) -> Dictionary:
+	if character_id <= 0:
+		return {"foot": 0, "archers": 0, "cavalry": 0, "levy": 0, "total": 0, "upkeep": 0}
+	db.query_with_bindings(
+		"SELECT foot, archers, cavalry, levy FROM retinues WHERE character_id = ?;",
+		[character_id]
+	)
+	var foot := 0; var archers := 0; var cav := 0; var levy := 0
+	if not db.query_result.is_empty():
+		var row: Dictionary = db.query_result[0]
+		foot = int(row.get("foot", 0))
+		archers = int(row.get("archers", 0))
+		cav = int(row.get("cavalry", 0))
+		levy = int(row.get("levy", 0))
+	var upkeep: int = (
+		foot * int(UPKEEP_PER_UNIT.foot)
+		+ archers * int(UPKEEP_PER_UNIT.archers)
+		+ cav * int(UPKEEP_PER_UNIT.cavalry)
+		+ levy * int(UPKEEP_PER_UNIT.levy)
+	)
+	return {
+		"foot": foot, "archers": archers, "cavalry": cav, "levy": levy,
+		"total": foot + archers + cav + levy,
+		"upkeep": upkeep,
+	}
+
+
+# Per-character end-of-turn economy. Each landed character takes a 25%
+# personal cut from the gross income of every holding they own (representing
+# manorial rents that don't flow to the crown), then pays retinue upkeep
+# out of personal_treasury. Treasury can go negative — a deficit signals
+# the lord is in arrears, which future systems can turn into desertion or
+# unrest events.
+#
+# Returns:
+#   Dictionary: {ticks: int} — number of characters processed.
+func _advance_personal_economy() -> Dictionary:
+	var ticks: int = 0
+	# Pull every alive character with at least one holding in a single query
+	# so we don't pay the SELECT cost per-character.
+	db.query("""
+		SELECT DISTINCT c.id AS character_id
+		FROM characters c
+		JOIN holdings h ON h.holder_character_id = c.id
+		WHERE c.alive = 1;""")
+	var ids: Array = []
+	for r in db.query_result:
+		ids.append(int(r["character_id"]))
+	for cid in ids:
+		var income: int = _personal_income_of(cid)
+		var ret: Dictionary = retinue_of(cid)
+		var net: int = income - int(ret.upkeep)
+		if net != 0:
+			db.query_with_bindings(
+				"UPDATE characters SET personal_treasury = personal_treasury + ? WHERE id = ?;",
+				[net, cid]
+			)
+		ticks += 1
+	return {"ticks": ticks}
+
+
+# 25% private-purse share of the gross income of every holding the character
+# owns. Income is read from MapData at the county level — barony shares are
+# the parent county's income divided across its baronies, since per-barony
+# income data isn't authoritative yet.
+func _personal_income_of(character_id: int) -> int:
+	const SHARE_NUM := 25
+	const SHARE_DEN := 100
+	var gross: int = 0
+	for h in holdings_of(character_id):
+		var rt: String = str(h.region_type)
+		var rid: String = str(h.region_id)
+		match rt:
+			"country":
+				gross += int(MapData.aggregate_country(rid).get("total_income", 0))
+			"duchy":
+				gross += int(MapData.aggregate_duchy(rid).get("total_income", 0))
+			"county":
+				gross += int(MapData.get_county(rid).get("income", 0))
+			"barony":
+				# Barony income = its share of the parent county's income.
+				var county_name: String = ""
+				for cn in MapData.counties:
+					for b in MapData.counties[cn].get("baronies", []):
+						if str(b.get("id", "")) == rid:
+							county_name = cn
+							break
+					if county_name != "":
+						break
+				if county_name != "":
+					var co: Dictionary = MapData.get_county(county_name)
+					var n: int = max(int(co.get("baronies", []).size()), 1)
+					@warning_ignore("integer_division")
+					gross += int(co.get("income", 0)) / n
+	@warning_ignore("integer_division")
+	return gross * SHARE_NUM / SHARE_DEN
+
+
 # Start a fresh game.
 func new_game(player_id: String) -> void:
 	player_faction_id = player_id
@@ -140,6 +326,10 @@ func new_game(player_id: String) -> void:
 	var seed_started_us: int = Time.get_ticks_usec()
 	db.query("BEGIN;")
 	_seed()
+	# Mark a new DB as already-migrated and seed retinues for the freshly
+	# created characters so the personal economy starts ticking immediately.
+	db.query("PRAGMA user_version = 2;")
+	_ensure_retinues_seeded()
 	db.query("COMMIT;")
 	@warning_ignore("integer_division")
 	var seed_ms: int = (Time.get_ticks_usec() - seed_started_us) / 1000
@@ -160,6 +350,13 @@ func load_save(path: String) -> bool:
 		return false
 	_open(WORKING_DB)
 	_create_schema()
+	# Older save files may predate the personal-treasury column + retinues
+	# table — run the same idempotent migrations the resume path uses so
+	# loaded saves come up to current schema.
+	_ensure_offices_seeded()
+	_ensure_economy_schema()
+	_ensure_ambitions_seeded()
+	_ensure_retinues_seeded()
 	state_changed.emit()
 	return true
 
@@ -274,6 +471,10 @@ func advance_turn() -> int:
 	# resolve births, comings-of-age, marriages, and deaths.
 	if next > 1 and (next - 1) % 4 == 0:
 		_advance_lifecycle(year)
+	# Personal economy ticks EVERY turn (not just the yearly transition) so
+	# upkeep bites continuously — gives the player a regular cash-flow rhythm
+	# rather than a once-a-year shock.
+	_advance_personal_economy()
 	state_changed.emit()
 	return next
 
@@ -1221,7 +1422,7 @@ const OFFICES_BY_TIER: Dictionary = {
 func office_holder(region_type: String, region_id: String, office_key: String) -> Dictionary:
 	db.query_with_bindings("""
 		SELECT c.id AS character_id, c.given_name, c.title, c.age, c.gender, c.alive,
-		       f.id AS family_id, f.surname, f.prestige
+			   f.id AS family_id, f.surname, f.prestige
 		FROM offices o
 		JOIN characters c ON c.id = o.holder_character_id
 		LEFT JOIN families f ON f.id = c.family_id
@@ -1388,10 +1589,9 @@ func submit_action(action_type: String, actor_id: int, target_id: int = 0,
 			"resolution_text": "Sent to %s for reply." % _short_name(target_id)}
 
 
-# Resolve a pending action. Applies opinion deltas and records resolution_text.
-# For most action types this is also the place to apply side-effects (e.g.
-# marriage actually creating spouse rows). Right now only opinion + status
-# are wired; mechanical side-effects per type land in follow-up work.
+# Resolve a pending action. Applies opinion deltas, dispatches a per-type
+# side-effect (e.g. appoint_office writes to the offices table; grant_aid
+# moves gold between faction treasuries), and records resolution_text.
 func resolve_action(action_id: int, accept: bool, custom_text: String = "") -> Dictionary:
 	db.query_with_bindings("SELECT * FROM actions WHERE id = ?;", [action_id])
 	if db.query_result.is_empty():
@@ -1410,9 +1610,28 @@ func resolve_action(action_id: int, accept: bool, custom_text: String = "") -> D
 	if target > 0 and op_delta != 0:
 		adjust_opinion(actor, target, op_delta)
 		adjust_opinion(target, actor, op_delta)
+	# Parse the payload (stored as JSON in the actions row) so the
+	# side-effect dispatcher gets a real Dictionary.
+	var payload: Dictionary = {}
+	if row.has("payload_json") and row.payload_json != null:
+		var raw: String = str(row.payload_json)
+		if raw != "":
+			var parsed = JSON.parse_string(raw)
+			if parsed is Dictionary:
+				payload = parsed
+	# Side-effect dispatch only runs on ACCEPT. Decline collapses to opinion-
+	# only. The helper returns a human-readable description of what it did
+	# (or didn't) so the inbox/history shows something more useful than the
+	# bare action key.
+	var effect_text: String = ""
+	if accept:
+		effect_text = _apply_action_side_effects(str(row.action_type), actor, target, payload)
 	var text: String = custom_text
 	if text.is_empty():
-		text = "%s %s by %s" % [str(row.action_type), new_status, _short_name(target)]
+		var verb: String = "accepted" if accept else "declined"
+		text = "%s %s by %s" % [str(row.action_type), verb, _short_name(target)]
+		if effect_text != "":
+			text += " — " + effect_text
 	db.query_with_bindings("""
 		UPDATE actions SET status = ?, resolved_turn = ?, resolution_text = ?
 		WHERE id = ?;""",
@@ -1420,6 +1639,146 @@ func resolve_action(action_id: int, accept: bool, custom_text: String = "") -> D
 	)
 	state_changed.emit()
 	return {"action_id": action_id, "status": new_status, "resolution_text": text}
+
+
+# Per-action mechanical side-effects. Called from resolve_action only on
+# ACCEPT. Each branch either applies its effect and returns a short summary
+# string, or returns "" when the action carries no mechanical consequence
+# beyond the opinion/prestige shifts already handled by submit/resolve.
+#
+# Args:
+#   action_type (String): catalog key (e.g. "appoint_office", "grant_aid").
+#   actor_id (int): initiator's character_id.
+#   target_id (int): recipient's character_id (0 for self-actions).
+#   payload (Dictionary): action-specific parameters carried on the actions
+#       row (e.g. {office_key, region_type, region_id} for appoint_office).
+# Returns:
+#   String: human-readable summary of what happened, or "" if nothing.
+func _apply_action_side_effects(action_type: String, actor_id: int,
+		target_id: int, payload: Dictionary) -> String:
+	match action_type:
+		"appoint_office":
+			# Liege grants the target an office. Payload MUST carry the office
+			# slot keys — without them we'd have to guess which slot, which is
+			# exactly the "what does this even do" problem the player ran into.
+			var office_key: String = str(payload.get("office_key", ""))
+			var region_type: String = str(payload.get("region_type", ""))
+			var region_id: String = str(payload.get("region_id", ""))
+			if office_key == "" or region_type == "" or region_id == "" or target_id <= 0:
+				return "appointment skipped (no slot specified — use Court/Region panel)"
+			# Eligibility: the candidate's family tier must reach the office's tier.
+			var eligible: Array = eligible_office_candidates(region_type, region_id)
+			var ok: bool = false
+			for c in eligible:
+				if int(c.get("character_id", 0)) == target_id:
+					ok = true
+					break
+			if not ok:
+				return "appointment refused (candidate ineligible for %s)" % office_key
+			appoint_to_office(region_type, region_id, office_key, target_id)
+			return "appointed %s of %s" % [str(OFFICE_LABELS.get(office_key, office_key)),
+					str(region_id).capitalize()]
+		"grant_aid":
+			# Liege transfers gold from their faction treasury to the target's
+			# faction treasury. Same-faction transfers are a paper move, so we
+			# bump target's family prestige instead (the political weight of
+			# the gift, since the money is from the same pool).
+			var amount: int = int(payload.get("amount", 100))
+			var actor_faction: String = _faction_of_character(actor_id)
+			var target_faction: String = _faction_of_character(target_id)
+			if actor_faction == "" or target_faction == "":
+				return ""
+			if actor_faction != target_faction:
+				adjust_treasury(actor_faction, -amount)
+				adjust_treasury(target_faction, amount)
+				return "%d £ transferred to %s" % [amount, target_faction.capitalize()]
+			# Same realm — convert the gesture into prestige for the target's house.
+			_bump_family_prestige_of(target_id, 5)
+			return "stipend of %d £ recorded (%s prestige +5)" % [amount, target_faction.capitalize()]
+		"levy_special_tax":
+			# Inverse of grant_aid: extract gold from a vassal's region into the
+			# actor's faction. Reduces the target family's prestige (resentment).
+			var amount2: int = int(payload.get("amount", 50))
+			var actor_faction2: String = _faction_of_character(actor_id)
+			if actor_faction2 != "":
+				adjust_treasury(actor_faction2, amount2)
+			_bump_family_prestige_of(target_id, -5)
+			return "levy of %d £ collected" % amount2
+		"sponsor_works":
+			# Lord pays out of pocket to enrich a vassal's seat. For now the
+			# treasury debit + prestige nudge stands in for a future region-
+			# income buff (handled when the retinue/upkeep economy lands).
+			var cost: int = int(payload.get("amount", 200))
+			var af: String = _faction_of_character(actor_id)
+			if af != "":
+				adjust_treasury(af, -cost)
+			_bump_family_prestige_of(target_id, 8)
+			return "%d £ spent on public works" % cost
+		"excommunicate":
+			# Heavy prestige hit on the target's family, on top of the opinion
+			# collapse already in the catalog.
+			_bump_family_prestige_of(target_id, -25)
+			return "target's house loses 25 prestige"
+		"bless_marriage":
+			_bump_family_prestige_of(target_id, 5)
+			return "marriage blessed (+5 prestige to %s's house)" % _short_name(target_id)
+		"swear_fealty":
+			_bump_family_prestige_of(actor_id, 3)
+			return "fealty sworn (+3 prestige to %s's house)" % _short_name(actor_id)
+		"request_marriage", "forge_alliance", "sue_for_peace", "declare_war", \
+		"spy_on_court", "raise_levy":
+			# These need systems that don't exist yet (marriage UI payload,
+			# alliances table, war state, knowledge graph, troops). The
+			# opinion / prestige flow that already ran is the only effect for
+			# now; surface that so the player isn't left wondering.
+			return "no mechanical effect yet (system pending)"
+	return ""
+
+
+# Faction id (lowercase country) the character's primary holding belongs to.
+# Falls back to the family's country if the character has no holdings of
+# their own — covers landless courtiers and unwed heirs.
+#
+# Args:
+#   character_id (int)
+# Returns:
+#   String: lowercase faction id ("england" / "wales" / "scotland"), or "".
+func _faction_of_character(character_id: int) -> String:
+	if character_id <= 0:
+		return ""
+	var holds: Array = holdings_of(character_id)
+	if not holds.is_empty():
+		var primary: Dictionary = holds[0]
+		var rt: String = str(primary.region_type)
+		var rid: String = str(primary.region_id)
+		# Walk up to the country tier.
+		while rt != "country":
+			var parent: Dictionary = parent_region(rt, rid)
+			if parent.is_empty():
+				break
+			rt = str(parent.region_type)
+			rid = str(parent.region_id)
+		if rt == "country":
+			return rid.to_lower()
+	# Fallback: read the character's family country if we stored one.
+	var ch: Dictionary = character(character_id)
+	return str(ch.get("country", "")).to_lower()
+
+
+# Move the named character's FAMILY prestige by `delta`. Used by action
+# side-effects that should reverberate beyond the actor (e.g. excommunicate
+# damages the whole house, not just the individual).
+func _bump_family_prestige_of(character_id: int, delta: int) -> void:
+	if character_id <= 0 or delta == 0:
+		return
+	var ch: Dictionary = character(character_id)
+	var fid: int = int(ch.get("family_id", 0))
+	if fid <= 0:
+		return
+	db.query_with_bindings(
+		"UPDATE families SET prestige = prestige + ? WHERE id = ?;",
+		[delta, fid]
+	)
 
 
 # Actions awaiting `character_id`'s reply (i.e. they're the target of a
@@ -1563,7 +1922,19 @@ func _create_schema() -> void:
 			stewardship INTEGER NOT NULL DEFAULT 5,
 			intrigue INTEGER NOT NULL DEFAULT 5,
 			piety INTEGER NOT NULL DEFAULT 5,
-			traits_json TEXT NOT NULL DEFAULT '[]'
+			traits_json TEXT NOT NULL DEFAULT '[]',
+			personal_treasury INTEGER NOT NULL DEFAULT 0
+		);""")
+	# Retinues — each character's standing host. Upkeep is paid every turn
+	# out of personal_treasury; unit counts can be edited as players + AI
+	# raise/disband troops in future work. One row per character (UNIQUE).
+	db.query("""
+		CREATE TABLE IF NOT EXISTS retinues (
+			character_id INTEGER PRIMARY KEY REFERENCES characters(id),
+			foot INTEGER NOT NULL DEFAULT 0,
+			archers INTEGER NOT NULL DEFAULT 0,
+			cavalry INTEGER NOT NULL DEFAULT 0,
+			levy INTEGER NOT NULL DEFAULT 0
 		);""")
 	# Per-character life events. Birth/coming-of-age/marriage/death-of-spouse/
 	# death — driven by the yearly lifecycle tick from advance_turn().
@@ -1948,10 +2319,12 @@ func eligible_office_candidates(region_type: String, region_id: String) -> Array
 	var seen: Dictionary = {}
 	var out: Array = []
 
-	# 1. The lord's relatives — pulls family_id so we can tier-gate.
+	# 1. The lord's relatives — pulls full stats + family prestige so the
+	# appointment UI can show comparable candidates side by side.
 	db.query_with_bindings("""
 		SELECT r.kind AS relation_hint, c.id AS character_id, c.given_name,
-		       c.title, c.age, c.family_id, f.surname
+			   c.title, c.age, c.family_id, f.surname, f.prestige,
+			   c.martial, c.diplomacy, c.stewardship, c.intrigue, c.piety
 		FROM relationships r
 		JOIN characters c ON c.id = r.related_id
 		LEFT JOIN families f ON f.id = c.family_id
@@ -1971,15 +2344,23 @@ func eligible_office_candidates(region_type: String, region_id: String) -> Array
 			"age": int(row["age"]),
 			"family_id": int(row["family_id"]) if row["family_id"] != null else 0,
 			"relation_hint": str(row["relation_hint"]),
+			"prestige": int(row["prestige"]) if row["prestige"] != null else 0,
+			"martial": int(row["martial"]) if row["martial"] != null else 0,
+			"diplomacy": int(row["diplomacy"]) if row["diplomacy"] != null else 0,
+			"stewardship": int(row["stewardship"]) if row["stewardship"] != null else 0,
+			"intrigue": int(row["intrigue"]) if row["intrigue"] != null else 0,
+			"piety": int(row["piety"]) if row["piety"] != null else 0,
 		})
 
-	# 2. Holders of sub-regions (vassals of this lord). We pull family_id
-	# explicitly since `vassals_of` already provides it.
+	# 2. Holders of sub-regions (vassals of this lord). Fetch the full stat
+	# block via a second per-character query so the same comparison data is
+	# available regardless of which path surfaced the candidate.
 	for v in vassals_of(holder_id):
 		var cid: int = int(v.get("character_id", 0))
 		if cid <= 0 or seen.has(cid):
 			continue
 		seen[cid] = true
+		var detail: Dictionary = character(cid)
 		out.append({
 			"character_id": cid,
 			"given_name": str(v.get("given_name", "")),
@@ -1988,6 +2369,12 @@ func eligible_office_candidates(region_type: String, region_id: String) -> Array
 			"age": int(v.get("age", 0)),
 			"family_id": int(v.get("family_id", 0)),
 			"relation_hint": "vassal",
+			"prestige": int(detail.get("prestige", 0)),
+			"martial": int(detail.get("martial", 0)),
+			"diplomacy": int(detail.get("diplomacy", 0)),
+			"stewardship": int(detail.get("stewardship", 0)),
+			"intrigue": int(detail.get("intrigue", 0)),
+			"piety": int(detail.get("piety", 0)),
 		})
 
 	# Tier gate. A candidate is eligible iff their family's highest-held
@@ -1998,9 +2385,66 @@ func eligible_office_candidates(region_type: String, region_id: String) -> Array
 	for cand in out:
 		var fid: int = int(cand.get("family_id", 0))
 		var ftier: int = int(family_tiers.get(fid, NO_HOLDING_TIER))
-		if ftier <= office_tier:
-			filtered.append(cand)
+		if ftier > office_tier:
+			continue
+		# Annotate with comparison-only fields the candidate UI needs.
+		cand["family_tier"] = ftier
+		cand["family_tier_label"] = _tier_label_for_rank(ftier)
+		# Opinion the candidate currently has of the appointing lord.
+		cand["opinion_of_liege"] = opinion_of(int(cand["character_id"]), holder_id)
+		cand["current_office"] = _short_office_for(int(cand["character_id"]))
+		filtered.append(cand)
 	return filtered
+
+
+# Compact "M12 D8 S5 I7 P4" style string for a candidate row. Cheap helper so
+# the appointment table can render the five stats in one column without
+# eating five columns of width. Used by the picker tables in court_panel +
+# region_panel.
+#
+# Args:
+#   c (Dictionary): candidate row with martial/diplomacy/stewardship/intrigue/piety.
+# Returns:
+#   String: glyph-prefixed stat line.
+func candidate_stats_brief(c: Dictionary) -> String:
+	return "M%d D%d S%d I%d P%d" % [
+		int(c.get("martial", 0)), int(c.get("diplomacy", 0)),
+		int(c.get("stewardship", 0)), int(c.get("intrigue", 0)),
+		int(c.get("piety", 0)),
+	]
+
+
+# Single label for a tier rank value (0..4). Used by the appointment UI's
+# Tier column so the player sees "Duke" / "Earl" instead of a bare number.
+func _tier_label_for_rank(rank: int) -> String:
+	match rank:
+		0: return "Crown"
+		1: return "Duke"
+		2: return "Earl"
+		3: return "Baron"
+	return "landless"
+
+
+# Compact human-readable string for whatever single office a character holds
+# right now — picks the highest-tier slot if they juggle several. Returns ""
+# when they hold none. Used by the appointment comparison table so the
+# player can see if the candidate is already occupying a post elsewhere.
+func _short_office_for(character_id: int) -> String:
+	var slots: Array = offices_of(character_id)
+	if slots.is_empty():
+		return ""
+	# Lower TIER_RANK number = higher tier; pick the topmost.
+	var best: Dictionary = slots[0]
+	var best_rank: int = int(TIER_RANK.get(str(best.get("region_type", "")), NO_HOLDING_TIER))
+	for s in slots:
+		var r: int = int(TIER_RANK.get(str(s.get("region_type", "")), NO_HOLDING_TIER))
+		if r < best_rank:
+			best_rank = r
+			best = s
+	return "%s of %s" % [
+		str(OFFICE_LABELS.get(str(best.get("office_key", "")), str(best.get("office_key", "")))),
+		str(best.get("region_id", "")),
+	]
 
 
 # ── AMBITIONS ────────────────────────────────────────────────────────────────
@@ -2063,7 +2507,7 @@ func ambition_of(character_id: int) -> Dictionary:
 		return {}
 	db.query_with_bindings("""
 		SELECT kind, target_office_key, target_region_type, target_region_id,
-		       set_turn, hidden
+			   set_turn, hidden
 		FROM character_ambitions
 		WHERE character_id = ?
 		LIMIT 1;""", [character_id])

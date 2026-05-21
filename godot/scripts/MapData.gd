@@ -22,6 +22,12 @@ var economy    : Dictionary = {}
 var is_loaded  : bool = false
 const DATA_PATH = "res://data/gb_godot.json"
 
+# Global income scale applied at design-overlay merge time. The 2026-05-21
+# economy rebalance multiplied baselines ×5 so retinue upkeep + lord personal
+# treasuries (added in the same pass) have room to mean anything. Bumping
+# this single constant is the one knob to retune the whole money supply.
+const INCOME_MULTIPLIER := 5
+
 # ── SIGNALS ───────────────────────────────────────────────────────────────────
 signal map_loaded
 signal region_conquered(county_id: String, new_earl: String, old_earl: String)
@@ -122,7 +128,12 @@ func _merge_design_overlay() -> void:
 		for b in counties[cn].get("baronies", []):
 			ids.append(b.get("id", ""))
 		var totals: Dictionary = dd.county_economy_from_baronies(ids)
-		counties[cn]["income"] = totals.get("income", 0)
+		# Income gets a global ×INCOME_MULTIPLIER bump so the campaign has
+		# headroom for the new retinue-upkeep economy: at the old baseline
+		# (~100 £ per county) most lords couldn't field a meaningful retinue
+		# after upkeep. Garrison + population stay at the design baselines —
+		# only the money supply scales.
+		counties[cn]["income"] = int(totals.get("income", 0)) * INCOME_MULTIPLIER
 		counties[cn]["garrison"] = totals.get("garrison", 0)
 		counties[cn]["population"] = totals.get("population", 0)
 

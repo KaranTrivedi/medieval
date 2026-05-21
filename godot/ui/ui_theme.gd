@@ -2,7 +2,7 @@
 # Project-wide UI palette + stylebox builders. Lets every panel share a
 # consistent look without each script re-declaring the same StyleBoxFlat
 # everywhere. Not an autoload — call as `UITheme.something()` after
-# `const UITheme := preload("res://ui_theme.gd")` in the caller.
+# `const UITheme := preload("res://ui/ui_theme.gd")` in the caller.
 #
 # Why a static class rather than a Theme resource: the panels are built
 # programmatically with overrides (font sizes, per-Label colors) and the

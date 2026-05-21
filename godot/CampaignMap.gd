@@ -40,9 +40,10 @@ const PAN_KEY_PIXELS_PER_SEC := 800.0  # WASD/arrow speed measured in SCREEN pix
 # as a drag (and pan the camera) rather than a click (and select a county).
 const CLICK_DRAG_THRESHOLD := 5.0
 
-# Width of the right-hand InfoPanel — subtract from horizontal viewport when
-# computing fit-to-screen so the map isn't half-hidden behind the panel.
-const UI_PANEL_WIDTH := 320.0
+# Hover delay before the rich region tooltip appears, in seconds. Set short
+# enough not to feel sluggish but long enough to avoid flickering tooltips
+# while the cursor sweeps across the map.
+const HOVER_DELAY := 0.5
 
 # Tracks the currently-selected county by its data-layer name (e.g. "Yorkshire"),
 # not by Polygon2D node, because a single county can be drawn as several polygons
@@ -70,6 +71,11 @@ var _left_dragged: bool = false
 #   0 = duchy band, 1 = county band, 2 = fief band
 var _last_zoom_band: int = -1
 
+# Hover-delay state. _pending_hover holds the most recent hit dict; the timer
+# fires after HOVER_DELAY seconds of stable hover and shows the rich tooltip.
+var _hover_timer: Timer
+var _pending_hover: Dictionary = {}
+
 # Last zoom value at which we rescaled Line2D widths. We only rescale when the
 # zoom changes by more than a small relative threshold to avoid touching ~600
 # Line2D nodes every single frame for sub-pixel jitter.
@@ -81,12 +87,14 @@ func _ready():
 	# Listen for slider-driven settings changes so labels + borders re-snap
 	# to the new thresholds without needing a manual refresh.
 	MapSettings.changed.connect(_on_map_settings_changed)
-	# Holder-row click in InfoPanel → open Character overview.
-	if ui.has_signal("holder_clicked"):
-		ui.holder_clicked.connect(_on_holder_clicked)
-	# Region "View details" button in InfoPanel → open RegionPanel.
-	if ui.has_signal("region_details_requested"):
-		ui.region_details_requested.connect(_on_region_details_requested)
+	# Build the hover delay Timer. We don't show the rich tooltip until the
+	# cursor sits still over the same region for HOVER_DELAY seconds —
+	# eliminates the flicker we'd get if every motion event redrew it.
+	_hover_timer = Timer.new()
+	_hover_timer.one_shot = true
+	_hover_timer.wait_time = HOVER_DELAY
+	_hover_timer.timeout.connect(_on_hover_timeout)
+	add_child(_hover_timer)
 	# Hook every panel's navigation signals into NavRouter so back / forward
 	# (mouse4 / mouse5) walks the visit history. The NavRouter node owns the
 	# stack; panels just emit their navigate intents.
@@ -339,8 +347,9 @@ func _on_map_settings_changed() -> void:
 	#build_map()
 
 
-# Frame the camera on the full polygon bounding box, leaving room on the
-# right for the InfoPanel. Bound to the F key in _unhandled_input.
+# Frame the camera on the full polygon bounding box using the entire
+# viewport. The old right-side InfoPanel that used to claim 320 px is gone,
+# so the map can now use the full window width. Bound to the F key.
 #
 # Returns: void
 func fit_to_bounds() -> void:
@@ -350,24 +359,14 @@ func fit_to_bounds() -> void:
 		camera.position = Vector2(1500, 170)
 		camera.zoom = Vector2(0.08, 0.08)
 		return
-	# Shift the focal point right so the geographic centre sits in the middle of
-	# the MAP area (viewport minus the panel), not the middle of the full window.
 	var vp_w: float = ProjectSettings.get_setting("display/window/size/viewport_width", 2300)
 	var vp_h: float = ProjectSettings.get_setting("display/window/size/viewport_height", 1440)
-	var map_w := vp_w - UI_PANEL_WIDTH
 	# 10% margin so the map doesn't kiss the edges.
-	var zx := map_w / (bbox.size.x * 1.1)
-	var zy := vp_h  / (bbox.size.y * 1.1)
-	var z := minf(zx, zy)
+	var zx: float = vp_w / (bbox.size.x * 1.1)
+	var zy: float = vp_h / (bbox.size.y * 1.1)
+	var z: float = minf(zx, zy)
 	camera.zoom = Vector2(z, z)
-	# Camera2D centres its position at the FULL viewport centre. The InfoPanel
-	# covers the right UI_PANEL_WIDTH pixels, so the "map area" centre is offset
-	# LEFT of the viewport centre by half the panel width. To make the bbox
-	# centre appear in the middle of the map area, the camera position must
-	# sit half-a-panel-width to the RIGHT of the bbox centre (in world units).
-	var centre := bbox.get_center()
-	centre.x += (UI_PANEL_WIDTH * 0.5) / z
-	camera.position = centre
+	camera.position = bbox.get_center()
 
 # ── INPUT ─────────────────────────────────────────────────────────────────────
 
@@ -524,13 +523,28 @@ func _hit_test_at_band(world_pos: Vector2) -> Dictionary:
 	return {"type": "county", "id": cn, "name": cn}
 
 
-# Route a hit to the right selector + InfoPanel update.
+# Route a hit to the right tinting helper, then open the Region panel for it.
+# Click-on-map now goes straight to the modal — there is no longer a
+# right-side InfoPanel to populate.
 func _dispatch_selection(hit: Dictionary) -> void:
-	match str(hit.get("type", "")):
-		"country": _select_country(hit)
-		"duchy":   _select_duchy(hit)
-		"county":  _select_county(str(hit.get("id", "")))
-		"barony":  _select_barony(hit)
+	var rtype: String = str(hit.get("type", ""))
+	var rid: String = ""
+	match rtype:
+		"country":
+			_select_country(hit)
+			# Country IDs are lowercase faction keys (england/wales/scotland).
+			rid = _selected_country.to_lower()
+		"duchy":
+			_select_duchy(hit)
+			rid = _selected_duchy
+		"county":
+			_select_county(str(hit.get("id", "")))
+			rid = _selected_county_name
+		"barony":
+			_select_barony(hit)
+			rid = _selected_barony
+	if rtype != "" and rid != "" and _nav != null:
+		_nav.open_region(rtype, rid)
 
 
 # Show + populate the InfoPanel for a country-tier selection. Tints every
@@ -544,14 +558,8 @@ func _select_country(hit: Dictionary) -> void:
 		var d: String = str(MapData.counties[cn].get("duchy", ""))
 		if MapData.COUNTRY_BY_DUCHY.get(d, "") == _selected_country:
 			_tint_county(cn, SELECTED_TINT)
-	var stats: Dictionary = MapData.aggregate_country(_selected_country)
-	stats["type"] = "country"
-	stats["name"] = hit.get("name", "")
-	# RegionPanel keys lookups by lowercase faction id (england/wales/scotland).
-	stats["id"] = _selected_country.to_lower()
-	# Look up the monarch row (country holders are keyed by lowercase faction id).
-	stats["holder"] = GameState.holder_of("country", _selected_country.to_lower())
-	ui.update_panel_typed(stats)
+	# Region panel is opened from _dispatch_selection — nothing to push into
+	# a right-side InfoPanel anymore.
 
 
 # Show + populate the InfoPanel for a duchy-tier selection. Tints all
@@ -564,12 +572,7 @@ func _select_duchy(hit: Dictionary) -> void:
 	for cn in MapData.counties:
 		if str(MapData.counties[cn].get("duchy", "")) == _selected_duchy:
 			_tint_county(cn, SELECTED_TINT)
-	var stats: Dictionary = MapData.aggregate_duchy(_selected_duchy)
-	stats["type"] = "duchy"
-	stats["name"] = hit.get("name", "")
-	stats["id"] = _selected_duchy
-	stats["holder"] = GameState.holder_of("duchy", _selected_duchy)
-	ui.update_panel_typed(stats)
+	# Region panel is opened from _dispatch_selection.
 
 
 # Show + populate the InfoPanel for a barony-tier selection. Tints the
@@ -604,13 +607,7 @@ func _select_barony(hit: Dictionary) -> void:
 		_tint_county(parent_county, Color(1.15, 1.10, 0.95))
 	# Aggregate barony economy from the parent county's pro-rata share so
 	# we have something meaningful to display until per-barony data lands.
-	var stats: Dictionary = MapData.aggregate_barony(parent_county, _selected_barony)
-	stats["type"] = "barony"
-	stats["name"] = hit.get("name", "")
-	stats["county"] = parent_county
-	stats["id"] = _selected_barony
-	stats["holder"] = GameState.holder_of("barony", _selected_barony)
-	ui.update_panel_typed(stats)
+	# Region panel is opened from _dispatch_selection.
 
 
 # Reset whatever tinting is currently applied without touching state vars.
@@ -653,9 +650,11 @@ func _clear_selection_tint() -> void:
 
 # ── TOOLTIP ───────────────────────────────────────────────────────────────────
 
-# Update or hide the hover tooltip based on what's under the cursor at the
-# current zoom band. Mirrors the click hit-test logic so the tooltip names
-# exactly what would be selected if the user clicked.
+# Track the cursor's current region target. If it's a new target, restart the
+# hover delay timer and hide any stale tooltip; the actual rich render runs
+# in _on_hover_timeout once HOVER_DELAY seconds pass without the target
+# changing. While the cursor moves over the same region we still update the
+# tooltip's screen position so it follows the mouse.
 #
 # Args:
 #   screen_pos (Vector2): mouse position in screen coordinates (for placement).
@@ -666,15 +665,111 @@ func _update_tooltip(screen_pos: Vector2, world_pos: Vector2) -> void:
 		return
 	var hit: Dictionary = _hit_test_at_band(world_pos)
 	if hit.is_empty():
+		_pending_hover = {}
 		tooltip.visible = false
+		if _hover_timer != null:
+			_hover_timer.stop()
 		return
-	tooltip_label.text = str(hit.get("name", ""))
-	# Place 16px right + 16px below the cursor.
+	var same_target: bool = (
+		not _pending_hover.is_empty()
+		and str(_pending_hover.get("type", "")) == str(hit.get("type", ""))
+		and str(_pending_hover.get("id", "")) == str(hit.get("id", ""))
+	)
+	_pending_hover = hit
 	tooltip.position = screen_pos + Vector2(16, 16)
+	if same_target:
+		# Mouse drifted within the same region — leave tooltip as-is (visible
+		# if the timer has already fired, hidden if not). Just track position.
+		return
+	# New target → wipe any stale tooltip and restart the delay.
+	tooltip.visible = false
+	if _hover_timer != null:
+		_hover_timer.start()
+
+
+# Timer-fired callback: render the rich tooltip for whatever region is still
+# under the cursor. Pulls aggregate income/population/garrison plus the
+# holder row from GameState, mirroring what the old right-side InfoPanel
+# used to show — but as a transient hover bubble instead of a docked panel.
+func _on_hover_timeout() -> void:
+	if tooltip == null or tooltip_label == null or _pending_hover.is_empty():
+		return
+	var hit: Dictionary = _pending_hover
+	tooltip_label.text = _build_tooltip_text(hit)
+	# Resize the tooltip Panel to match the multi-line label content + padding.
+	var pad: Vector2 = Vector2(16, 12)
+	var label_min: Vector2 = tooltip_label.get_minimum_size()
+	tooltip.size = label_min + pad * 2
+	tooltip_label.position = pad
 	tooltip.visible = true
 
 
+# Build the multi-line tooltip body for a hit dict produced by _hit_test_at_band.
+# Returns a string ready to drop into tooltip_label.text.
+func _build_tooltip_text(hit: Dictionary) -> String:
+	var rtype: String = str(hit.get("type", ""))
+	var rid: String = str(hit.get("id", ""))
+	var region_name: String = str(hit.get("name", ""))
+	var lines: Array[String] = []
+	var tier_caption: String = rtype.capitalize()
+	lines.append("%s  ·  %s" % [region_name, tier_caption])
+	# Look up the holder of this region. Country IDs are lowercased.
+	var holder_key: String = rid.to_lower() if rtype == "country" else rid
+	var holder: Dictionary = GameState.holder_of(rtype, holder_key)
+	if not holder.is_empty():
+		var title: String = str(holder.get("title", "Lord"))
+		var given: String = str(holder.get("given_name", "")).strip_edges()
+		var surname: String = str(holder.get("surname", "")).strip_edges()
+		var age: int = int(holder.get("age", 0))
+		var full: String = (given + " " + surname).strip_edges()
+		if full == "":
+			full = "Unknown"
+		var holder_line: String = "%s: %s" % [title, full]
+		if age > 0:
+			holder_line += "  (age %d)" % age
+		lines.append(holder_line)
+	else:
+		lines.append("Unclaimed")
+	# Aggregate economy. Each tier has its own MapData helper.
+	var stats: Dictionary = {}
+	match rtype:
+		"country": stats = MapData.aggregate_country(rid)
+		"duchy":   stats = MapData.aggregate_duchy(rid)
+		"county":  stats = MapData.get_county(rid)
+		"barony":  stats = MapData.aggregate_barony(str(hit.get("county", "")), rid)
+	if not stats.is_empty():
+		var income: int = int(stats.get("total_income", stats.get("income", 0)))
+		var pop: int = int(stats.get("population", 0))
+		var garr: int = int(stats.get("garrison", 0))
+		if income > 0: lines.append("Income:  %s £/yr" % _fmt_thousands(income))
+		if pop > 0:    lines.append("People:  %s" % _fmt_thousands(pop))
+		if garr > 0:   lines.append("Garrison: %s" % _fmt_thousands(garr))
+	return "\n".join(lines)
+
+
+# Format an integer with comma thousands separators. Local copy so the
+# tooltip doesn't have to round-trip through the (now-stub) ui_panel.gd.
+func _fmt_thousands(n: int) -> String:
+	var s := str(n)
+	var sign_prefix := ""
+	if s.begins_with("-"):
+		sign_prefix = "-"
+		s = s.substr(1)
+	var out := ""
+	var count := 0
+	for i in range(s.length() - 1, -1, -1):
+		out = s[i] + out
+		count += 1
+		if count == 3 and i > 0:
+			out = "," + out
+			count = 0
+	return sign_prefix + out
+
+
 func _hide_tooltip() -> void:
+	_pending_hover = {}
+	if _hover_timer != null:
+		_hover_timer.stop()
 	if tooltip != null:
 		tooltip.visible = false
 
@@ -709,20 +804,15 @@ func _select_county(county_name: String) -> void:
 	_selected_county_name = county_name
 	_tint_county(county_name, SELECTED_TINT)
 
-	var data: Dictionary = MapData.get_county(county_name).duplicate()
-	data["type"] = "county"
-	data["name"] = county_name
-	data["holder"] = GameState.holder_of("county", county_name)
-	ui.update_panel_typed(data)
+	# Region panel is opened from _dispatch_selection.
 
 
-# Reset the current selection: drop tinting AND hide the InfoPanel.
+# Reset the current selection: drop tinting. No right-side InfoPanel to hide
+# anymore — the only persistent visual is the polygon tint.
 func _clear_selection() -> void:
 	_clear_selection_tint()
 	_selected_type = ""
 	_selected_county_name = ""
-	if ui.has_method("clear_panel"):
-		ui.clear_panel()
 
 
 # Apply a modulate tint to every Polygon2D whose "county_name" meta matches.

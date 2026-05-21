@@ -21,14 +21,17 @@
 
 extends VBoxContainer
 
-const UITheme := preload("res://ui_theme.gd")
+const UITheme := preload("res://ui/ui_theme.gd")
 
 signal row_clicked(row: Dictionary)
 
 var _columns: Array = []
 var _rows: Array = []
 var _sort_key: String = ""
-var _sort_dir: int = 1     # 1 ascending, -1 descending
+# 1 = ascending, -1 = descending. New sort columns default to DESCENDING because
+# "biggest first" is the answer the player usually wants (most income, oldest,
+# largest garrison, highest opinion). Re-clicking the same column toggles.
+var _sort_dir: int = -1
 
 var _header_row: HBoxContainer
 var _body: VBoxContainer
@@ -216,11 +219,14 @@ func _cmp(a, b) -> int:
 
 
 func _on_header_clicked(key: String) -> void:
+	# Toggle direction on the same column; switching columns resets to DESC
+	# (largest-first), which is the answer players usually want for the
+	# numeric columns that dominate these tables.
 	if key == _sort_key:
 		_sort_dir = -_sort_dir
 	else:
 		_sort_key = key
-		_sort_dir = 1
+		_sort_dir = -1
 	_rebuild_header()
 	_rebuild_body()
 

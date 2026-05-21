@@ -2,7 +2,7 @@
 
 Captain's log for cross-chat continuity. Read this before doing any work in a fresh session. Update at the end of each session.
 
-**Last touched:** 2026-05-21 — Office eligibility tier-gate + barony-name display in CharacterPanel + this handoff file. Working in `godot/scripts/GameState.gd` (eligibility) and `godot/character_panel.gd` (display).
+**Last touched:** 2026-05-21 — Big UX + economy pass: killed the right-side InfoPanel (replaced with a rich hover tooltip), region clicks now open RegionPanel directly, candidate compare table for office appointments, Lord (liege chain) section in CharacterPanel, action side-effects (esp. `appoint_office`), `×5` income bump + retinue/upkeep economy, and `godot/` folder reorg into `panels/` + `ui/` + `tools/` + `docs/`.
 
 ---
 
@@ -14,9 +14,9 @@ Captain's log for cross-chat continuity. Read this before doing any work in a fr
 
 | File | Role |
 |---|---|
-| `data/gb_godot.json` | Immutable geometry / topology (counties, baronies as LAD13CDs). Built by `convert_to_godot.py`. |
-| `data/gb_design.json` | Immutable design data (monarchs, earls, dukes, barony holders, economy baselines, name pools). Built by `extract_design.py`. |
-| `user://current.db` | Live mutable state — characters, families, holdings, offices, opinions, lifecycle events, ambitions. |
+| `godot/data/gb_godot.json` | Immutable geometry / topology (counties, baronies as LAD13CDs). Built by `godot/tools/convert_to_godot.py`. |
+| `godot/data/gb_design.json` | Immutable design data (monarchs, earls, dukes, barony holders, economy baselines, name pools). Built by `godot/tools/extract_design.py`. |
+| `user://current.db` | Live mutable state — characters, families, holdings, offices, opinions, lifecycle events, ambitions, retinues. |
 
 ### Autoload order
 `MapSettings → DesignData → MapData → GaussianSystem → GameState`. Always.
@@ -43,8 +43,13 @@ Captain's log for cross-chat continuity. Read this before doing any work in a fr
 | `offices` | Court appointments. **Never auto-filled.** | `(region_type, region_id, office_key)` PK |
 | `actions` | Player + AI action queue (pending / accepted / declined). | `id` AUTOINCREMENT |
 | `character_ambitions` | Hidden motivation per character. | `character_id` UNIQUE |
+| `retinues` | Per-character standing host: foot/archers/cavalry/levy counts. Upkeep computed on read via `UPKEEP_PER_UNIT`. | `character_id` PK |
 
-**`PRAGMA user_version = 1`** is the legacy-sweep sentinel (offices-courtier wipe was done; do not re-run that on existing saves).
+`characters` table also carries a `personal_treasury INTEGER` column (added in the v2 migration). Negative values mean the lord is in arrears — surfaced in the panel with a red tint.
+
+**`PRAGMA user_version`** sentinels:
+- `1` — legacy-sweep complete (offices-courtier wipe; safe to ignore on existing saves).
+- `2` — `personal_treasury` column + `retinues` table present. Migration is idempotent: `_ensure_economy_schema` ALTERs only if the column is missing, then bumps to 2.
 
 ---
 
@@ -57,7 +62,43 @@ Captain's log for cross-chat continuity. Read this before doing any work in a fr
 | County | sheriff, coroner, bailiff |
 | Barony | castellan, reeve, forester |
 
-**Office eligibility rule (just landed):** candidate's family tier rank must be ≤ office tier rank (i.e. family must be at least as high as the office). Implemented in `GameState.eligible_office_candidates`.
+**Office eligibility rule:** candidate's family tier rank must be ≤ office tier rank. Implemented in `GameState.eligible_office_candidates`, which now also annotates each candidate with prestige, all five stats, opinion-of-liege, family-tier label, and currently-held office.
+
+**Office key-stat hint:** office → primary stat lookup (`OFFICE_KEY_STAT`) is duplicated in both `region_panel.gd` and `court_panel.gd`. Surfaced in the picker header as "(key stat: Martial)" so the player knows which Stats column matters.
+
+---
+
+## Folder layout (2026-05-21)
+
+```
+godot/
+  CampaignMap.tscn + .gd        ← main scene + script (stays at root)
+  MainMenu.tscn + main_menu.gd  ← title screen (stays at root)
+  project.godot
+  addons/godot-sqlite/...
+  assets/...
+  data/gb_godot.json, gb_design.json
+  scripts/                      ← autoloads + heavy data layers
+    MapSettings.gd, DesignData.gd, MapData.gd, GaussianSystem.gd, GameState.gd,
+    DashedPolygon.gd
+  panels/                       ← every modal panel
+    character_panel.gd, family_tree_panel.gd, region_panel.gd, court_panel.gd,
+    settings_panel.gd, cascading_panel.gd, db_browser.gd
+  ui/                           ← cross-cutting UI primitives
+    ui_theme.gd (class_name UITheme), ui_panel.gd, top_bar.gd,
+    nav_router.gd, data_table.gd
+  tools/                        ← offline build scripts
+    convert_to_godot.py, extract_design.py
+  docs/                         ← design notes (not loaded by Godot)
+    Project.md, interactive_*.html, england.html, debug_map.svg
+```
+
+Path-sensitive callers updated in the same pass:
+- `CampaignMap.tscn` ext_resource paths
+- `data_table.gd`, `region_panel.gd`, `court_panel.gd` preloads (`res://ui/data_table.gd`, `res://ui/ui_theme.gd`)
+- `MainMenu.tscn` still points at root `main_menu.gd`, which stays there.
+
+The Godot UID system (.gd.uid sidecars moved alongside their .gd) preserves cross-scene references for anything that uses `uid://…` instead of `res://…`.
 
 ---
 
@@ -67,10 +108,14 @@ All four modals unified at **880×640** with Close (`✕`) pinned top-right. The
 
 | Panel | Tabs / sections |
 |---|---|
-| `character_panel.gd` | **Overview** (scrollable; Stats / Offices / Holdings / Vassals on left, Family on right), **History** (lifecycle events with year gutter), **Diplomacy** (Opinion / Actions / Inbox). Footer: 🌳 Family-tree button. |
-| `family_tree_panel.gd` | Shogun-2 style: top row = framed FAMILY (parents) + SIBLINGS boxes side-by-side, middle = HOUSE HEAD + spouse, bottom = CHILDREN. ✝ icon + grey style on deceased chips. |
-| `region_panel.gd` | **Economy** (totals + sub-region DataTable), **Ownership** (holder card + walked liege chain + vassals DataTable), **Offices** (slots with Appoint/Replace/Dismiss flow + inline picker), **Subregions**. |
-| `court_panel.gd` | Header (monarch + Close), Great Offices section with same Appoint/Replace/Dismiss flow, Direct Vassals list. |
+| `panels/character_panel.gd` | **Overview** (scrollable; Stats / Lord / Offices / Holdings / Retinue / Vassals on left, Family on right), **History** (lifecycle events with year gutter), **Diplomacy** (Opinion / Actions / Inbox). Footer: 🌳 Family-tree button. |
+| `panels/family_tree_panel.gd` | Shogun-2 style: top row = framed FAMILY (parents) + SIBLINGS boxes side-by-side, middle = HOUSE HEAD + spouse, bottom = CHILDREN. ✝ icon + grey style on deceased chips. |
+| `panels/region_panel.gd` | **Economy** (totals + sub-region DataTable), **Ownership** (holder card + walked liege chain + vassals DataTable), **Offices** (slots with Appoint/Replace/Dismiss flow + DataTable-based candidate compare picker), **Subregions**. |
+| `panels/court_panel.gd` | Header (monarch + Close), Great Offices section with same DataTable picker, Direct Vassals list. |
+
+**Map interaction:**
+- **Hover** any region for ~500 ms → rich tooltip with name/tier/holder/age/income/population/garrison. Hover delay timer in `CampaignMap.gd` (`HOVER_DELAY = 0.5`).
+- **Click** a region → directly opens `RegionPanel`. The old right-side InfoPanel was removed; `ui_panel.gd` is now a slim CanvasLayer stub that keeps the existing .tscn script reference valid.
 
 ### Cross-panel patterns
 - **NavRouter** (`nav_router.gd`, Node under `UI/Control`) owns the back/forward history (max 64). Every open call routes through it. **mouse4 / mouse5** wired in `NavRouter._input` (NOT `CampaignMap._unhandled_input` — panels would swallow it).
@@ -96,19 +141,41 @@ All four modals unified at **880×640** with Close (`✕`) pinned top-right. The
 
 ---
 
-## Actions + prestige
+## Actions + prestige + side-effects
 
 `ACTION_CATALOG` (in `GameState.gd`) declares every action with: `label`, `direction` (up/down/peer/self), `resolution` (immediate/reply), `prestige_cost`, optional `requires_office`, optional `on_accept_opinion` / `on_decline_opinion`.
 
-Currently:
-- **Base actions**: request_marriage, grant_aid, appoint_office, swear_fealty.
-- **Office-gated**: raise_levy, declare_war (marshal); levy_special_tax, sponsor_works (treasurer); forge_alliance, sue_for_peace (chancellor); spy_on_court (spymaster); bless_marriage, excommunicate (chaplain).
+`resolve_action` now dispatches to `_apply_action_side_effects(action_type, actor, target, payload)` on accept. Mechanical effects per type:
 
-**Prestige is a per-family budget**, decremented on `submit_action`. No regeneration yet — that's WIP.
+| Action | Effect on accept (in addition to opinion shift) |
+|---|---|
+| `appoint_office` | If payload carries `{office_key, region_type, region_id}`: writes to `offices` via `appoint_to_office` (eligibility re-checked). Without payload, resolution text says "appointment skipped — use Court/Region panel." |
+| `grant_aid` | Cross-faction: gold transfer via `adjust_treasury`. Same-faction: +5 prestige to target's house. |
+| `levy_special_tax` | Actor faction +gold, target family –5 prestige. |
+| `sponsor_works` | Actor faction –gold, target family +8 prestige. (Region income buff pending.) |
+| `excommunicate` | Target family –25 prestige, plus the catalog's –50 opinion. |
+| `bless_marriage` | Target family +5 prestige. |
+| `swear_fealty` | Actor family +3 prestige. |
+| `request_marriage`, `forge_alliance`, `sue_for_peace`, `declare_war`, `spy_on_court`, `raise_levy` | Opinion / prestige flow only — resolution text flags "no mechanical effect yet (system pending)." |
+
+**Prestige is a per-family budget**, decremented on `submit_action`. No regeneration yet — still WIP.
 
 Two key read APIs:
 - `actions_for(cid)` — every action this character qualifies for, filtered by office only. Used by the "Actions available to …" display.
 - `available_actions(actor, target)` — direction-filtered. Used by "Your actions toward them" (player → subject).
+
+---
+
+## Economy + retinue (NEW 2026-05-21)
+
+- **Global income ×5 multiplier** applied at `MapData._merge_design_overlay` time (`MapData.INCOME_MULTIPLIER`). Garrison + population unchanged. One knob to retune the money supply.
+- **`retinues` table** — `character_id` PK + `foot`/`archers`/`cavalry`/`levy` counts. Default counts seeded by holding tier (monarchs 200+50+25+10; dukes 60+20+8+5; counts 25+8+3+3; barons 8+3+1+2; landless 0).
+- **Upkeep per turn**: `UPKEEP_PER_UNIT = {foot:1, archers:2, cavalry:4, levy:1}`.
+- **Per-character end-of-turn tick** (`_advance_personal_economy`, runs every turn in `advance_turn`):
+  1. Sum 25% of every holding's gross income → personal_treasury.
+  2. Subtract retinue upkeep from personal_treasury.
+  3. Treasury can go negative — visualised red in `CharacterPanel`'s Retinue section.
+- **Schema migration v1→v2** (`_ensure_economy_schema`): idempotent ALTER + sentinel bump. Fresh DBs bypass the ALTER entirely.
 
 ---
 
@@ -135,15 +202,18 @@ Two key read APIs:
 
 ## WIP (carries between chats)
 
-- **Hidden ambitions schema in place; AI driver still TODO.** Characters carry ambitions but nothing acts on them yet. Next step: in `_advance_lifecycle`, characters with `attain_office` ambitions periodically submit `appoint_office` requests targeted at appropriate lieges (or `request_marriage` if angling for a rival's family).
+- **AI ambition driver still TODO.** Characters carry hidden ambitions but nothing acts on them yet. Next step: in `_advance_lifecycle`, characters with `attain_office` ambitions periodically submit `appoint_office` requests (now meaningful! — payload-aware).
 - **Intrigue / discovery layer.** Plan: `character_knowledge` table (knower_id, target_id, fact_kind, payload, learned_turn). Spymaster `spy_on_court` rolls vs target intrigue → on success, INSERT a knowledge row that reveals one hidden ambition.
 - **`block_appointment` and `prevent_marriage` actions.** When accepted, register a one-year veto on the corresponding event.
 - **Ambition reveal in CharacterPanel** — once `hidden = 0`, render a small "Ambitions" section under the header.
 - **Prestige regeneration tick** — currently actions only debit. Per-year refill proportional to holdings income, capped at 100.
-- **`appoint_office` *action* side-effect** — currently the action only adjusts opinion. The direct UI flow via Court / Region panels works (`appoint_to_office`). The action-system version should also write to the offices table on accept.
+- **Action UI doesn't yet collect `appoint_office` payload.** The action side-effect respects payload `{office_key, region_type, region_id}` but no UI gathers those when submitting from the Diplomacy tab. For now the direct Court/Region panel picker is the canonical appointment path; the action surfaces "appointment skipped" if invoked without payload.
+- **Raise/disband retinue UI** — the table is in place and upkeep ticks every turn, but the player can't change unit counts yet. Needs a `_recruit_unit(character_id, kind, n)` + spend gold from personal_treasury.
+- **Region income buff from `sponsor_works`** — currently logs prestige only; should boost the target county's income next harvest tick.
 - **End-of-year chronicle popup** showing the year's lifecycle events.
 - **Older overlays (DbBrowser / SettingsPanel / CascadingPanel) still use the original opaque stylebox** — needs a UITheme pass.
 - **DataTable column resize** handles for longer region names.
+- **`OFFICE_KEY_STAT` lookup is duplicated** in `region_panel.gd` and `court_panel.gd`. Worth moving to `ui/ui_theme.gd` or a small shared util once a third caller appears.
 
 ---
 
@@ -157,7 +227,14 @@ Two key read APIs:
 
 ## Recent design decisions
 
-- **2026-05-21**: Office eligibility is per-family-tier, not per-character-tier (a non-holder's "rank" is taken from their family's best holding). Barons cannot fill duchy/country offices, etc.
+- **2026-05-21 (PM)**: Right-side InfoPanel removed. Map clicks open `RegionPanel` directly; long-hover (~500 ms) shows a rich tooltip with the info the InfoPanel used to carry. `ui_panel.gd` is now a slim stub script kept for scene-script compatibility.
+- **2026-05-21 (PM)**: DataTable first-click defaults to DESCENDING (largest-first is the answer the player usually wants for income/age/garrison). Subsequent clicks toggle.
+- **2026-05-21 (PM)**: Office appointment picker upgraded to a sortable comparison DataTable — Name, Age, House, Tier, Prestige, compact M/D/S/I/P stats, opinion-of-liege, current office. Picker header surfaces the office's "key stat" so the player knows which column matters.
+- **2026-05-21 (PM)**: `resolve_action` dispatches per-type side-effects (see Actions table above). `appoint_office` now actually appoints when payload is sufficient — was the named complaint.
+- **2026-05-21 (PM)**: CharacterPanel Overview adds a **Lord** section between Stats and Offices, walking `liege_of` upward; and a **Retinue** section after Holdings showing troop counts + upkeep + personal_treasury (red when negative).
+- **2026-05-21 (PM)**: Income ×5 baseline bump + `retinues` table + `personal_treasury` column. End-turn personal economy tick credits 25% of holding income to personal_treasury and pays upkeep. Schema migration v1→v2 is idempotent.
+- **2026-05-21 (PM)**: Folder reorg — `godot/{panels,ui,tools,docs}/` plus existing `scripts/` (autoloads). `CampaignMap.gd/.tscn` + `MainMenu.tscn`/`main_menu.gd` stay at the godot root.
+- **2026-05-21 (AM)**: Office eligibility is per-family-tier, not per-character-tier.
 - **2026-05-20**: Offices NEVER auto-spawn; appointment is always a lord's prerogative via the Court/Region panel UI. One-shot legacy sweep via `PRAGMA user_version = 1` cleared earlier auto-seeded courtiers.
 - **2026-05-20**: All four modals unified to 880×640 with Close at top-right; NavRouter wired to mouse4/mouse5 via `_input` (not `_unhandled_input`).
 - **2026-05-20**: Office sets are tier-unique (no key appears in two tiers). Renamed the country tier's `steward` → `treasurer` to match.

@@ -1,17 +1,17 @@
 [gd_scene format=3 uid="uid://i1hvn2qu4dum"]
 
 [ext_resource type="Script" uid="uid://c7q7qnbrv2bak" path="res://CampaignMap.gd" id="1_bvam6"]
-[ext_resource type="Script" uid="uid://caj7f0xue2hei" path="res://ui_panel.gd" id="2_uipanel"]
-[ext_resource type="Script" uid="uid://so2rxas51hka" path="res://top_bar.gd" id="3_topbar"]
+[ext_resource type="Script" uid="uid://caj7f0xue2hei" path="res://ui/ui_panel.gd" id="2_uipanel"]
+[ext_resource type="Script" uid="uid://so2rxas51hka" path="res://ui/top_bar.gd" id="3_topbar"]
 [ext_resource type="Texture2D" uid="uid://xesnbi1kn3rg" path="res://assets/page_seamless_01.png" id="4_brjqc"]
-[ext_resource type="Script" uid="uid://b65mvqcdibu11" path="res://settings_panel.gd" id="5_settings"]
-[ext_resource type="Script" path="res://db_browser.gd" id="6_dbbrowser"]
-[ext_resource type="Script" path="res://cascading_panel.gd" id="7_cascading"]
-[ext_resource type="Script" path="res://character_panel.gd" id="8_charpanel"]
-[ext_resource type="Script" path="res://family_tree_panel.gd" id="9_ftpanel"]
-[ext_resource type="Script" path="res://region_panel.gd" id="10_regionpanel"]
-[ext_resource type="Script" path="res://court_panel.gd" id="11_courtpanel"]
-[ext_resource type="Script" path="res://nav_router.gd" id="12_navrouter"]
+[ext_resource type="Script" uid="uid://b65mvqcdibu11" path="res://panels/settings_panel.gd" id="5_settings"]
+[ext_resource type="Script" path="res://panels/db_browser.gd" id="6_dbbrowser"]
+[ext_resource type="Script" path="res://panels/cascading_panel.gd" id="7_cascading"]
+[ext_resource type="Script" path="res://panels/character_panel.gd" id="8_charpanel"]
+[ext_resource type="Script" path="res://panels/family_tree_panel.gd" id="9_ftpanel"]
+[ext_resource type="Script" path="res://panels/region_panel.gd" id="10_regionpanel"]
+[ext_resource type="Script" path="res://panels/court_panel.gd" id="11_courtpanel"]
+[ext_resource type="Script" path="res://ui/nav_router.gd" id="12_navrouter"]
 
 [sub_resource type="LabelSettings" id="LabelSettings_4"]
 
@@ -110,26 +110,6 @@ text = "End Turn"
 [node name="SettingsButton" type="Button" parent="UI/Control/TopBar/HBox"]
 layout_mode = 2
 text = "⚙ Settings"
-
-[node name="InfoPanel" type="Panel" parent="UI/Control" unique_id=1400951060]
-theme_override_styles/panel = SubResource("StyleBoxFlat_OpaquePanel")
-visible = false
-layout_mode = 0
-anchor_left = 1.0
-anchor_right = 1.0
-anchor_bottom = 1.0
-offset_left = -320.0
-offset_top = 44.0
-
-[node name="VBoxContainer" type="VBoxContainer" parent="UI/Control/InfoPanel" unique_id=548813705]
-layout_mode = 0
-anchor_right = 1.0
-anchor_bottom = 1.0
-offset_left = 10.0
-offset_top = 10.0
-offset_right = -10.0
-offset_bottom = -10.0
-theme_override_constants/separation = 8
 
 [node name="SettingsPanel" type="Panel" parent="UI/Control" unique_id=2128913537]
 theme_override_styles/panel = SubResource("StyleBoxFlat_OpaquePanel")

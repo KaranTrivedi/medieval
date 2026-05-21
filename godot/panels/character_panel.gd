@@ -250,8 +250,10 @@ func _build_overview_tab(ch: Dictionary) -> Control:
 	left.add_theme_constant_override("separation", 12)
 	split.add_child(left)
 	_build_stats(left, ch)
+	_build_liege_chain(left, ch)
 	_build_offices(left, ch)
 	_build_holdings(left, ch)
+	_build_retinue(left, ch)
 	_build_vassals(left, ch)
 
 	# RIGHT: Family.
@@ -295,6 +297,59 @@ func _build_holdings(parent: Control, ch: Dictionary) -> void:
 # Vassals section — every sub-region holder that answers to this character
 # across all of their holdings. Each row is a clickable button that routes
 # to the vassal's character panel via NavRouter.
+# Retinue + personal treasury section. Surfaces the per-character economy
+# layer added with the 2026-05-21 income rebalance: standing troop count
+# broken out by type, turn-by-turn upkeep, and the lord's personal purse.
+# Hidden for landless courtiers who have no troops to maintain.
+#
+# Args:
+#   parent (Control): container to attach the section to.
+#   ch (Dictionary): character row being shown.
+# Returns: void
+func _build_retinue(parent: Control, ch: Dictionary) -> void:
+	var cid: int = int(ch.get("character_id", 0))
+	if cid <= 0:
+		return
+	var ret: Dictionary = GameState.retinue_of(cid)
+	var total: int = int(ret.get("total", 0))
+	var purse: int = int(ch.get("personal_treasury", 0))
+	# Skip the section entirely for characters with neither troops nor
+	# private gold — keeps the panel quiet for courtiers + children.
+	if total <= 0 and purse == 0:
+		return
+	parent.add_child(UITheme.section_header("Retinue"))
+	var grid := GridContainer.new()
+	grid.columns = 2
+	grid.add_theme_constant_override("h_separation", 24)
+	grid.add_theme_constant_override("v_separation", 4)
+	parent.add_child(grid)
+	const ORDER := ["foot", "archers", "cavalry", "levy"]
+	for k in ORDER:
+		var count: int = int(ret.get(k, 0))
+		if count <= 0:
+			continue
+		grid.add_child(UITheme.dim_label(String(k).capitalize(), 12))
+		var v := UITheme.text_label(str(count), 13)
+		v.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		grid.add_child(v)
+	# Totals row — upkeep is the per-turn drain.
+	grid.add_child(UITheme.dim_label("Total troops", 12))
+	var tlbl := UITheme.text_label(str(total), 13)
+	tlbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	grid.add_child(tlbl)
+	grid.add_child(UITheme.dim_label("Upkeep / turn", 12))
+	var ulbl := UITheme.text_label("%d £" % int(ret.get("upkeep", 0)), 13)
+	ulbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	grid.add_child(ulbl)
+	grid.add_child(UITheme.dim_label("Personal treasury", 12))
+	var plbl := UITheme.text_label("%d £" % purse, 13)
+	plbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	# Negative treasury = in arrears; tint red so it reads at a glance.
+	if purse < 0:
+		plbl.add_theme_color_override("font_color", Color(0.85, 0.35, 0.30))
+	grid.add_child(plbl)
+
+
 func _build_vassals(parent: Control, ch: Dictionary) -> void:
 	var cid: int = int(ch.get("character_id", 0))
 	if cid <= 0:
@@ -337,6 +392,96 @@ func _build_vassals(parent: Control, ch: Dictionary) -> void:
 		var vcid: int = int(v.get("character_id", 0))
 		name_btn.pressed.connect(func(): navigate_to.emit(vcid))
 		row.add_child(name_btn)
+
+
+# Lord section — walks UP the liege chain from this character so the player
+# can see who they answer to (their immediate liege, that liege's liege, and
+# so on up to the monarch). Empty for monarchs and for landless characters
+# who don't sit anywhere in the feudal hierarchy.
+#
+# Args:
+#   parent (Control): container to attach the section to.
+#   ch (Dictionary): character row being shown.
+# Returns: void
+func _build_liege_chain(parent: Control, ch: Dictionary) -> void:
+	var cid: int = int(ch.get("character_id", 0))
+	if cid <= 0:
+		return
+	var chain: Array = _walk_liege_chain(cid)
+	if chain.is_empty():
+		return
+	parent.add_child(UITheme.section_header("Lord"))
+	for i in chain.size():
+		var l: Dictionary = chain[i]
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 8)
+		parent.add_child(row)
+		var ctx_text: String = "  ".repeat(i) + "↑ %s · %s" % [
+			str(l.get("region_type", "")).capitalize(),
+			_pretty_region({
+				"region_type": str(l.get("region_type", "")),
+				"region_id": str(l.get("region_id", "")),
+			}),
+		]
+		var ctx_lbl := UITheme.dim_label(ctx_text, 11)
+		ctx_lbl.custom_minimum_size.x = 200
+		row.add_child(ctx_lbl)
+		var alive: bool = bool(l.get("alive", true))
+		var name_btn := Button.new()
+		name_btn.flat = true
+		var dagger: String = "  ✝" if not alive else ""
+		name_btn.text = "%s %s%s" % [
+			str(l.get("given_name", "")),
+			str(l.get("surname", "")),
+			dagger,
+		]
+		name_btn.add_theme_font_size_override("font_size", 12)
+		name_btn.add_theme_color_override("font_color",
+				UITheme.COL_INK_DEAD if not alive else UITheme.COL_INK)
+		name_btn.add_theme_color_override("font_hover_color", UITheme.COL_BUTTON_HOVER)
+		name_btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		name_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var lcid: int = int(l.get("character_id", 0))
+		name_btn.pressed.connect(func(): navigate_to.emit(lcid))
+		row.add_child(name_btn)
+
+
+# Walk upward from a character's primary holding, returning each successive
+# liege holder row in order (immediate liege first, then their liege, etc.).
+# Stops at the country tier or when a parent region has no holder.
+#
+# Args:
+#   cid (int): character to start from.
+# Returns:
+#   Array: liege Dictionaries annotated with region_type + region_id.
+func _walk_liege_chain(cid: int) -> Array:
+	var out: Array = []
+	var first: Dictionary = GameState.liege_of(cid)
+	if first.is_empty():
+		return out
+	out.append(first)
+	# Continue upward using parent_region on each liege's annotated region.
+	while true:
+		var current: Dictionary = out.back()
+		var lt: String = str(current.get("region_type", ""))
+		var lid: String = str(current.get("region_id", ""))
+		if lt == "" or lid == "":
+			break
+		var parent: Dictionary = GameState.parent_region(lt, lid)
+		if parent.is_empty():
+			break
+		var pt: String = str(parent.get("region_type", ""))
+		var pid: String = str(parent.get("region_id", ""))
+		var h: Dictionary = GameState.holder_of(pt, pid)
+		if h.is_empty():
+			break
+		h["region_type"] = pt
+		h["region_id"] = pid
+		# Guard: don't loop on a self-referential parent.
+		if int(h.get("character_id", 0)) == int(current.get("character_id", 0)):
+			break
+		out.append(h)
+	return out
 
 
 func _build_offices(parent: Control, ch: Dictionary) -> void:
