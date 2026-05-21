@@ -674,6 +674,7 @@ Also add in the chronicle tab, Information about end turns, whether there was a 
 Need a table showing all baronaries , counties etc. in a cascading table. two tables needed, one by ownership, another by not owned. Show all related stats.
 Is there any way I can traverse the sqlite databases? I would like to be able the view the entries and tables etc.Also I added a sprite2D layer, I would like it to fit the background correctly. we can deal with that later if its too complicated.
 
+
 **Out of scope for Phase 1:**
 - Family trees and bastards
 - Full Chronicle / Bard system
