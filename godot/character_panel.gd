@@ -315,11 +315,14 @@ func _build_lifecycle(ch: Dictionary) -> void:
 
 func _pretty_event(kind: String) -> String:
 	match kind:
-		"birth":         return "born"
-		"coming_of_age": return "came of age"
-		"marriage":      return "married"
-		"widowed":       return "widowed"
-		"death":         return "died"
+		"birth":                return "born"
+		"coming_of_age":        return "came of age"
+		"marriage":             return "married"
+		"widowed":              return "widowed"
+		"death":                return "died"
+		"inherited":            return "inherited a holding"
+		"inheritance_blocked":  return "inheritance blocked by liege"
+		"escheated":            return "received an escheated holding"
 	return kind
 
 

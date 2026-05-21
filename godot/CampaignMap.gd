@@ -100,7 +100,32 @@ func _ready():
 	else:
 		print("MapData not loaded yet — waiting for map_loaded signal")
 		MapData.map_loaded.connect(build_map, CONNECT_ONE_SHOT)
+	# Optional headless simulation hook: pass `--sim-years=N` (or set the env
+	# var MEDIEVAL_SIM_YEARS=N) to advance N years and quit. Useful for CI
+	# and for verifying the lifecycle without clicking End Turn N×4 times.
+	_maybe_run_headless_sim()
 	print("=== _ready() END ===")
+
+
+func _maybe_run_headless_sim() -> void:
+	var years: int = 0
+	for arg in OS.get_cmdline_user_args():
+		if arg.begins_with("--sim-years="):
+			years = int(arg.substr("--sim-years=".length()))
+	if years <= 0:
+		var env: String = OS.get_environment("MEDIEVAL_SIM_YEARS")
+		if env != "":
+			years = int(env)
+	if years <= 0:
+		return
+	if not GameState.db:
+		return
+	if not MapData.is_loaded:
+		await MapData.map_loaded
+	print("--- SIM: advancing %d years (= %d turns) ---" % [years, years * 4])
+	for i in years * 4:
+		GameState.end_turn()
+	print("--- SIM: done. turn=%d ---" % GameState.current_turn())
 
 
 # When the user clicks the holder name in the InfoPanel, open the character

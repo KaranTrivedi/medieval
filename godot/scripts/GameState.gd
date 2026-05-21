@@ -226,9 +226,10 @@ func _advance_lifecycle(year: int) -> void:
 		_log_lifecycle(int(row["id"]), "coming_of_age", year, {})
 
 	# 3. Deaths. age >= death_age → dead. Logs the event, sets alive=0,
-	#    and notifies the surviving spouse with a "widowed" event.
+	#    spawns "widowed" events for spouses, and triggers succession on any
+	#    holdings the deceased held.
 	db.query("""
-		SELECT id, given_name FROM characters
+		SELECT id FROM characters
 		WHERE alive = 1 AND age >= death_age;""")
 	var dying: Array = []
 	for row in db.query_result:
@@ -236,60 +237,137 @@ func _advance_lifecycle(year: int) -> void:
 	for cid in dying:
 		_die(cid, year)
 
-	# 4. Marriage matching. Cheap deterministic pairing of eligible singles.
+	# 4. Marriage matching — hierarchy-aware. See _try_match_marriages.
 	_try_match_marriages(year)
 
+	# 5. Spawn-spouse fallback: unwed barony lords aged 30+ get a partner
+	#    spawned in from the regional name pool (no permission needed).
+	_spawn_partner_fallback(year)
 
-# Record a death: log the event, flip alive to 0, log "widowed" for spouse(es).
-# Holdings are NOT yet transferred — succession lands as a follow-up phase.
+	# 6. Yearly fertility roll for married couples — newborns get added.
+	_spawn_children(year)
+
+
+# Tier rank: lower = higher in the hierarchy. Used to score marriage
+# candidates (we prefer pairings near the same tier).
+const TIER_RANK := {"country": 0, "duchy": 1, "county": 2, "barony": 3}
+const NO_HOLDING_TIER := 4
+
+
+# Record a death: log the event, flip alive to 0, mark widowed spouses,
+# transfer holdings to heirs (or escheat). See _process_succession.
 func _die(cid: int, year: int) -> void:
 	_log_lifecycle(cid, "death", year, {})
 	db.query_with_bindings("UPDATE characters SET alive = 0 WHERE id = ?;", [cid])
-	# Flag the spouse, if any.
 	db.query_with_bindings("""
 		SELECT related_id FROM relationships
 		WHERE character_id = ? AND kind = 'spouse';""", [cid])
 	for row in db.query_result:
 		_log_lifecycle(int(row["related_id"]), "widowed", year, {"of_id": cid})
+	# Succession on every holding the deceased had.
+	db.query_with_bindings("""
+		SELECT region_type, region_id FROM holdings WHERE holder_character_id = ?;""",
+		[cid])
+	var holdings: Array = []
+	for row in db.query_result:
+		holdings.append({"region_type": str(row["region_type"]), "region_id": str(row["region_id"])})
+	for h in holdings:
+		_process_succession(cid, h.region_type, h.region_id, year)
 
 
-# Walk eligible singles and pair them off. Males 18+; females 16-35. Skips
-# anyone with an existing spouse, anyone deceased, and same-family pairs
-# (no incest). Pairs at most MARRIAGES_PER_YEAR per tick to avoid avalanche.
-const MARRIAGES_PER_YEAR := 25
+# ── MARRIAGE ─────────────────────────────────────────────────────────────────
+# Hierarchy-aware matchmaker. For every eligible bachelor, we search the
+# bachelorettes in this preference order:
+#   1. SAME tier as the groom's family (peers)
+#   2. ONE tier UP (marrying into a higher house, requires liege permission)
+#   3. ONE tier DOWN (marrying into a lesser house)
+# Best candidate within the preferred band is scored on age proximity and a
+# small random jitter, then the marriage is evaluated against a heuristic
+# that approximates the liege's approval.
+const MARRIAGES_PER_YEAR := 60
+const AGE_GAP_MAX := 12
 func _try_match_marriages(year: int) -> void:
-	var bachelors: Array = _eligible_singles("male", 18, 999)
-	var bachelorettes: Array = _eligible_singles("female", 16, 35)
+	var bachelors: Array = _eligible_singles_ranked("male", 18, 999)
+	var bachelorettes: Array = _eligible_singles_ranked("female", 16, 35)
 	if bachelors.is_empty() or bachelorettes.is_empty():
 		return
+	var used: Dictionary = {}     # character_id → true once taken this tick
 	var paired: int = 0
-	var used_brides: Dictionary = {}
 	for groom in bachelors:
 		if paired >= MARRIAGES_PER_YEAR:
 			return
-		var groom_family_id: int = int(groom.family_id)
-		var groom_age: int = int(groom.age)
-		# Find a bride: different family, age within ±12 years, no other groom
-		# has already taken her this tick.
-		for bride in bachelorettes:
-			var bid: int = int(bride.id)
-			if used_brides.has(bid):
-				continue
-			if int(bride.family_id) == groom_family_id:
-				continue
-			var bride_age: int = int(bride.age)
-			if abs(bride_age - groom_age) > 12:
-				continue
-			# Match.
-			used_brides[bid] = true
-			_marry(int(groom.id), bid, year)
+		if used.has(int(groom.id)):
+			continue
+		var bride = _find_best_match(groom, bachelorettes, used)
+		if bride == null:
+			continue
+		var verdict: Dictionary = _evaluate_marriage(groom, bride)
+		if verdict.accept:
+			_consummate_marriage(int(groom.id), int(bride.id), year, str(verdict.note))
+			used[int(groom.id)] = true
+			used[int(bride.id)] = true
 			paired += 1
-			break
+		else:
+			# Mark the bride as used this tick anyway so other grooms don't
+			# all converge on her in the same year.
+			used[int(bride.id)] = true
 
 
-# Pull alive, unwed characters of a given gender in an age window.
-# Returns rows with {id, given_name, family_id, age}.
-func _eligible_singles(gender: String, min_age: int, max_age: int) -> Array:
+# Pick the best bride for a groom, walking the hierarchy preference bands.
+# Returns the bride row (with family_tier annotation) or null if no match.
+func _find_best_match(groom: Dictionary, brides: Array, used: Dictionary):
+	var groom_tier: int = int(groom.get("family_tier", NO_HOLDING_TIER))
+	# Preference bands: same tier first, then up one, then down one, then any.
+	var bands: Array = [0, -1, 1, -2, 2, -3, 3]
+	for tier_delta in bands:
+		var target_tier: int = groom_tier + tier_delta
+		var best = null
+		var best_score: float = -INF
+		for bride in brides:
+			if used.has(int(bride.id)):
+				continue
+			if int(bride.family_id) == int(groom.family_id):
+				continue
+			if abs(int(bride.age) - int(groom.age)) > AGE_GAP_MAX:
+				continue
+			if int(bride.family_tier) != target_tier:
+				continue
+			# Score: lower age gap = better, plus a small jitter.
+			var age_gap: int = absi(int(bride.age) - int(groom.age))
+			var score: float = (AGE_GAP_MAX - age_gap) + GaussianSystem.sample(0.0, 1.5)
+			if score > best_score:
+				best_score = score
+				best = bride
+		if best != null:
+			return best
+	return null
+
+
+# Liege-approval heuristic. Score = base 50 + tier compatibility ± Gaussian.
+# Tier deltas:
+#   |Δtier| = 0  → +20 (best)
+#   |Δtier| = 1  → +10
+#   |Δtier| = 2  →   0
+#   |Δtier| >= 3 → -10 (mismatched pairing rarely approved)
+# Accept threshold: score > 50.
+func _evaluate_marriage(groom: Dictionary, bride: Dictionary) -> Dictionary:
+	var g_tier: int = int(groom.get("family_tier", NO_HOLDING_TIER))
+	var b_tier: int = int(bride.get("family_tier", NO_HOLDING_TIER))
+	var delta: int = absi(g_tier - b_tier)
+	var tier_bonus: int = 20
+	if delta == 1: tier_bonus = 10
+	elif delta == 2: tier_bonus = 0
+	elif delta >= 3: tier_bonus = -10
+	var jitter: float = GaussianSystem.sample(0.0, 10.0)
+	var score: float = 50.0 + float(tier_bonus) + jitter
+	var note: String = "Δtier=%d, jitter=%.1f, score=%.1f" % [delta, jitter, score]
+	return {"accept": score > 50.0, "note": note}
+
+
+# Eligible singles + family_tier annotation. Pulls every alive unwed
+# character of the given gender within an age window and computes their
+# family's tier (max tier of any holding any family member currently holds).
+func _eligible_singles_ranked(gender: String, min_age: int, max_age: int) -> Array:
 	db.query_with_bindings("""
 		SELECT c.id, c.given_name, c.family_id, c.age
 		FROM characters c
@@ -301,17 +379,309 @@ func _eligible_singles(gender: String, min_age: int, max_age: int) -> Array:
 		ORDER BY c.age ASC, c.id ASC;""",
 		[gender, min_age, max_age]
 	)
-	var out: Array = []
+	var rows: Array = []
 	for row in db.query_result:
-		out.append(row.duplicate())
+		rows.append(row.duplicate())
+	# Annotate with family_tier (lowest TIER_RANK across the family's holdings).
+	var family_tiers: Dictionary = _compute_family_tiers()
+	for r in rows:
+		r["family_tier"] = int(family_tiers.get(int(r.family_id), NO_HOLDING_TIER))
+	return rows
+
+
+# Map family_id → tier (lower = higher rank) by scanning every holding.
+func _compute_family_tiers() -> Dictionary:
+	db.query("""
+		SELECT h.holder_family_id AS fid, h.region_type AS rt FROM holdings h;""")
+	var out: Dictionary = {}
+	for row in db.query_result:
+		var fid: int = int(row["fid"])
+		var tier: int = int(TIER_RANK.get(str(row["rt"]), NO_HOLDING_TIER))
+		if not out.has(fid) or tier < int(out[fid]):
+			out[fid] = tier
 	return out
 
 
-# Record the marriage edge in both directions + log lifecycle event for both.
-func _marry(groom_id: int, bride_id: int, year: int) -> void:
+# Actually perform the marriage: insert spouse edges + log events.
+func _consummate_marriage(groom_id: int, bride_id: int, year: int, note: String = "") -> void:
 	_link_pair(groom_id, bride_id, "spouse")
-	_log_lifecycle(groom_id, "marriage", year, {"spouse_id": bride_id})
-	_log_lifecycle(bride_id, "marriage", year, {"spouse_id": groom_id})
+	var payload: Dictionary = {"spouse_id": bride_id}
+	if note != "":
+		payload["note"] = note
+	_log_lifecycle(groom_id, "marriage", year, payload)
+	payload = {"spouse_id": groom_id}
+	if note != "":
+		payload["note"] = note
+	_log_lifecycle(bride_id, "marriage", year, payload)
+
+
+# Spawn a randomly-generated partner for unwed barony holders aged 30+.
+# This is the "if no eligible match exists, you settle locally" fallback —
+# only valid for the lowest tier (barons). Higher tiers stay unwed.
+func _spawn_partner_fallback(year: int) -> void:
+	if not DesignData.loaded:
+		return
+	db.query("""
+		SELECT c.id, c.family_id, c.gender, c.age
+		FROM characters c
+		WHERE c.alive = 1 AND c.age >= 30
+		  AND NOT EXISTS (
+			SELECT 1 FROM relationships r
+			WHERE r.character_id = c.id AND r.kind = 'spouse'
+		  )
+		  AND EXISTS (
+			SELECT 1 FROM holdings h
+			WHERE h.holder_character_id = c.id AND h.region_type = 'barony'
+		  );""")
+	var lonely: Array = []
+	for row in db.query_result:
+		lonely.append(row.duplicate())
+	for row in lonely:
+		var partner_gender: String = "female" if str(row.gender) == "male" else "male"
+		# Pick a name pool: derive region letter from the holder's barony LAD.
+		var region_letter: String = _region_letter_for_barony_holder(int(row.id))
+		var pools: Dictionary = DesignData.name_pools
+		var given_pool: Array = pools.get("female" if partner_gender == "female" else "male", {}).get(region_letter, [])
+		if given_pool.is_empty():
+			given_pool = pools.get("female" if partner_gender == "female" else "male", {}).get("E", [])
+		var surname_pool: Array = pools.get("surnames", {}).get(region_letter, [])
+		if surname_pool.is_empty():
+			surname_pool = pools.get("surnames", {}).get("E", [])
+		if given_pool.is_empty() or surname_pool.is_empty():
+			continue
+		var seed_str: String = "spawn:%d:%d" % [int(row.id), year]
+		var given_name: String = given_pool[_hash_int(seed_str, 1) % given_pool.size()]
+		var sn: String = surname_pool[_hash_int(seed_str, 2) % surname_pool.size()]
+		# Partner age: ±5 of lord's age, clamped to marriageable window.
+		var lord_age: int = int(row.age)
+		var p_min: int = 18 if partner_gender == "male" else 16
+		var p_max: int = 60 if partner_gender == "male" else 35
+		var partner_age: int = clampi(lord_age + ((_hash_int(seed_str, 3) % 11) - 5), p_min, p_max)
+		var fid: int = _ensure_family(sn, 35)
+		var title: String = "Lord" if partner_gender == "male" else "Lady"
+		var pid: int = _insert_character(given_name, fid, title, partner_age, partner_gender)
+		# Order matters for `_consummate_marriage` — groom (male) first.
+		if str(row.gender) == "male":
+			_consummate_marriage(int(row.id), pid, year, "spawned-partner")
+		else:
+			_consummate_marriage(pid, int(row.id), year, "spawned-partner")
+
+
+# Best-guess country letter (E/W/S) for a barony holder from their LAD13CD.
+func _region_letter_for_barony_holder(cid: int) -> String:
+	db.query_with_bindings("""
+		SELECT region_id FROM holdings
+		WHERE holder_character_id = ? AND region_type = 'barony' LIMIT 1;""",
+		[cid]
+	)
+	if db.query_result.is_empty():
+		return "E"
+	var lad: String = str(db.query_result[0]["region_id"])
+	if lad.length() == 0:
+		return "E"
+	return lad.substr(0, 1)
+
+
+# ── CHILDREN ─────────────────────────────────────────────────────────────────
+# Per-year fertility roll on every alive married couple. Mother age is the
+# limiting factor (women bear children until ~45 historically). 22% baseline
+# chance per year, lifted slightly for younger couples.
+const CHILD_BASE_CHANCE := 0.22
+const CHILD_MOTHER_AGE_MAX := 45
+const CHILD_FATHER_AGE_MAX := 70
+func _spawn_children(year: int) -> void:
+	if not DesignData.loaded:
+		return
+	# Pull each unique couple (spouse rel is bidirectional, so dedupe by id-order).
+	db.query("""
+		SELECT r.character_id AS a, r.related_id AS b
+		FROM relationships r
+		WHERE r.kind = 'spouse' AND r.character_id < r.related_id;""")
+	var couples: Array = []
+	for row in db.query_result:
+		couples.append({"a": int(row["a"]), "b": int(row["b"])})
+	for couple in couples:
+		_maybe_birth(couple.a, couple.b, year)
+
+
+func _maybe_birth(a_id: int, b_id: int, year: int) -> void:
+	var a: Dictionary = character(a_id)
+	var b: Dictionary = character(b_id)
+	if a.is_empty() or b.is_empty():
+		return
+	if not bool(a.get("alive", false)) or not bool(b.get("alive", false)):
+		return
+	# Identify mother/father by gender.
+	var mother: Dictionary
+	var father: Dictionary
+	if str(a.get("gender", "")) == "female":
+		mother = a; father = b
+	else:
+		mother = b; father = a
+	if str(mother.get("gender", "")) != "female" or str(father.get("gender", "")) != "male":
+		return  # only opposite-sex pairings produce children in this model
+	var m_age: int = int(mother.get("age", 0))
+	var f_age: int = int(father.get("age", 0))
+	if m_age > CHILD_MOTHER_AGE_MAX or m_age < 16:
+		return
+	if f_age > CHILD_FATHER_AGE_MAX or f_age < 18:
+		return
+	# Per-year roll. Slight age penalty after 35.
+	var chance: float = CHILD_BASE_CHANCE
+	if m_age > 35:
+		chance *= 0.6
+	if randf() > chance:
+		return
+	_spawn_child(int(father.character_id), int(mother.character_id), year)
+
+
+# Insert a newborn: child takes father's family (patrilineal), random gender,
+# age 0. Linked as child of both parents.
+func _spawn_child(father_id: int, mother_id: int, year: int) -> void:
+	var father: Dictionary = character(father_id)
+	if father.is_empty():
+		return
+	var father_family_id: int = int(father.get("family_id", 0))
+	var father_surname: String = str(father.get("surname", "Unknown"))
+	var region_letter: String = _region_letter_for_surname(father_surname)
+	var pools: Dictionary = DesignData.name_pools
+	var gender: String = "male" if (randi() % 2 == 0) else "female"
+	var pool: Array = pools.get("male" if gender == "male" else "female", {}).get(region_letter, [])
+	if pool.is_empty():
+		pool = pools.get("male" if gender == "male" else "female", {}).get("E", [])
+	if pool.is_empty():
+		return
+	var given_name: String = pool[randi() % pool.size()]
+	var cid: int = _insert_character(given_name, father_family_id,
+			"Lord" if gender == "male" else "Lady", 0, gender)
+	_link_pair(father_id, cid, "child")
+	_link_pair(mother_id, cid, "child")
+	# Override the inferred birth year so it matches the simulation year.
+	db.query_with_bindings("""
+		UPDATE lifecycle_events SET year = ?
+		WHERE character_id = ? AND kind = 'birth';""", [year, cid])
+
+
+# Best-guess country letter from a surname; mirrors _region_for_surname but
+# returns "E"/"W"/"S" letters directly.
+func _region_letter_for_surname(surname: String) -> String:
+	return _region_for_surname(surname)
+
+
+# ── INHERITANCE ──────────────────────────────────────────────────────────────
+# When a holder dies, walk the family tree for an heir. Priority order:
+#   1. Eldest living son (same family, male child)
+#   2. Eldest younger son
+#   3. Eldest living brother (male sibling, same family)
+#   4. Escheat to the holding's liege (parent_region's holder)
+#
+# Liege block: when a non-trivial inheritance happens (heir would relocate
+# from another region of equal/higher tier), the new liege has a Gaussian
+# chance to block — failed blocks escheat instead. For Phase B we keep this
+# light; the framework is here for future depth.
+func _process_succession(deceased_id: int, region_type: String, region_id: String, year: int) -> void:
+	var heir: Dictionary = _find_heir(deceased_id)
+	if heir.is_empty():
+		_escheat(region_type, region_id, year)
+		return
+	var heir_id: int = int(heir.get("character_id", heir.get("id", 0)))
+	if heir_id <= 0:
+		_escheat(region_type, region_id, year)
+		return
+	# Liege block check. We compare the heir's CURRENT primary tier to the
+	# inherited region's tier — climbing UP to a higher tier triggers a roll.
+	if _liege_blocks_inheritance(heir_id, region_type, region_id):
+		_log_lifecycle(heir_id, "inheritance_blocked", year, {
+			"region_type": region_type, "region_id": region_id,
+			"from_id": deceased_id,
+		})
+		_escheat(region_type, region_id, year)
+		return
+	# Heir relocates: they ABANDON their existing holdings (which escheat
+	# to their previous lieges) and take the inherited one. This is the
+	# "leave their existing post and physical location" the user described.
+	var prev_holdings: Array = holdings_of(heir_id)
+	for prev in prev_holdings:
+		_escheat(str(prev.region_type), str(prev.region_id), year)
+	# Transfer the inherited holding.
+	var heir_family_id: int = int(character(heir_id).get("family_id", 0))
+	_set_holding(region_type, region_id, heir_id, heir_family_id)
+	_log_lifecycle(heir_id, "inherited", year, {
+		"region_type": region_type, "region_id": region_id,
+		"from_id": deceased_id,
+	})
+
+
+# Eldest living male child of deceased, then eldest male sibling, then {}.
+# Returns {character_id, age, family_id} or {} for none-found.
+func _find_heir(deceased_id: int) -> Dictionary:
+	# 1. Sons of deceased — alive, male, oldest first.
+	db.query_with_bindings("""
+		SELECT c.id AS character_id, c.age, c.family_id
+		FROM relationships r
+		JOIN characters c ON c.id = r.related_id
+		WHERE r.character_id = ? AND r.kind = 'child' AND c.alive = 1 AND c.gender = 'male'
+		ORDER BY c.age DESC LIMIT 1;""", [deceased_id])
+	if not db.query_result.is_empty():
+		return db.query_result[0].duplicate()
+	# 2. Brothers — male sibling, alive, oldest first.
+	db.query_with_bindings("""
+		SELECT c.id AS character_id, c.age, c.family_id
+		FROM relationships r
+		JOIN characters c ON c.id = r.related_id
+		WHERE r.character_id = ? AND r.kind = 'sibling' AND c.alive = 1 AND c.gender = 'male'
+		ORDER BY c.age DESC LIMIT 1;""", [deceased_id])
+	if not db.query_result.is_empty():
+		return db.query_result[0].duplicate()
+	return {}
+
+
+# Liege blocks the inheritance with a chance proportional to how big a
+# promotion the heir is getting. Climbing two tiers up has a real chance
+# of being blocked; lateral / down moves never blocked. Returns true to
+# block (escheat instead of transfer).
+func _liege_blocks_inheritance(heir_id: int, inherited_type: String, _inherited_id: String) -> bool:
+	var heir_prev: Array = holdings_of(heir_id)
+	if heir_prev.is_empty():
+		return false   # no prior post, no political objection
+	var inherited_tier: int = int(TIER_RANK.get(inherited_type, NO_HOLDING_TIER))
+	var heir_top_tier: int = NO_HOLDING_TIER
+	for h in heir_prev:
+		var t: int = int(TIER_RANK.get(str(h.region_type), NO_HOLDING_TIER))
+		if t < heir_top_tier:
+			heir_top_tier = t
+	# Climbing UP (smaller tier number): roll a block chance ~ 15% per step.
+	if inherited_tier >= heir_top_tier:
+		return false
+	var steps: int = heir_top_tier - inherited_tier
+	var block_chance: float = 0.15 * float(steps)
+	return randf() < block_chance
+
+
+# Transfer a holding to the holding's parent (liege's) holder. If no parent
+# exists (country tier), the holding becomes unowned and is logged as such.
+func _escheat(region_type: String, region_id: String, year: int) -> void:
+	var parent: Dictionary = parent_region(region_type, region_id)
+	if parent.is_empty():
+		# Top-tier (country) escheat: leave unowned for now. Log the event.
+		db.query_with_bindings(
+			"DELETE FROM holdings WHERE region_type = ? AND region_id = ?;",
+			[region_type, region_id]
+		)
+		return
+	var liege: Dictionary = holder_of(parent.region_type, parent.region_id)
+	if liege.is_empty():
+		db.query_with_bindings(
+			"DELETE FROM holdings WHERE region_type = ? AND region_id = ?;",
+			[region_type, region_id]
+		)
+		return
+	var liege_id: int = int(liege.get("character_id", 0))
+	var liege_family_id: int = int(liege.get("family_id", 0))
+	_set_holding(region_type, region_id, liege_id, liege_family_id)
+	_log_lifecycle(liege_id, "escheated", year, {
+		"region_type": region_type, "region_id": region_id,
+	})
 
 
 func _log_lifecycle(character_id: int, kind: String, year: int, payload: Dictionary) -> void:
